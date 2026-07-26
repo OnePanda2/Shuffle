@@ -1,0 +1,29 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.venv/
+venv/
+env/
+
+# --- PyInstaller build output (rebuild anytime with build_exe.bat) ---
+build/
+dist/
+*.spec
+
+# --- Local app runtime data (normally in %LOCALAPPDATA%, ignored just in case) ---
+*.db
+*.db-wal
+*.db-shm
+*.log
+
+# --- OS / editor cruft ---
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# --- Claude Code local config ---
+.claude/

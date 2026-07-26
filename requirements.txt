@@ -1,0 +1,7 @@
+# Smart VLC Randomizer — runtime dependencies (all local; no network use at runtime)
+PySide6>=6.5,<7.0     # Desktop UI framework (Qt for Python)
+Send2Trash>=1.8       # Move deleted files to the Windows Recycle Bin (recoverable delete)
+
+# Development / testing only:
+#   pytest             # unit + statistical tests
+#   psutil             # resource sampling in the feasibility harness

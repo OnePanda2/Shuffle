@@ -1,0 +1,395 @@
+"""
+Integration tests for the 8-step Next pipeline in SlotManager, using a fake VLC
+instance and a controllable clock so behaviour is deterministic.
+
+These are the most important behavioural tests in the project: they lock in
+watched/skipped classification, the exactly-N cooldown semantics, the strict
+separation of the exclusion and review lists, per-folder state sharing, and
+correct routing of loads to the correct window.
+"""
+from types import SimpleNamespace
+
+import pytest
+
+from vlc_randomizer.media_library import MediaLibrary
+from vlc_randomizer.slot_manager import Classification, NextStatus, SlotManager
+from vlc_randomizer.state_store import StateStore
+
+
+class FakeVlc:
+    """Stand-in for VlcInstance: records loaded files, never touches a process.
+
+    Tracks a fake playlist id (``plid``) and state so the native-control
+    detection (poll_and_maybe_advance) can be exercised deterministically.
+    """
+
+    def __init__(self, port):
+        self.port = port
+        self.loaded = []          # history of files loaded into this window
+        self.launched = False
+        self.stopped = False
+        self.plid = 0             # increments on each load (like VLC assigns)
+        self.state = "stopped"
+
+    def launch(self, *a, **k):
+        self.launched = True
+
+    def load(self, file_path):
+        self.loaded.append(file_path)
+        self.plid += 1
+        self.state = "playing"
+        return True
+
+    def get_status(self):
+        return SimpleNamespace(state=self.state, plid=self.plid,
+                               time=0, length=0, filename=None)
+
+    def stop(self):
+        self.stopped = True
+
+    def is_process_alive(self):
+        return self.launched and not self.stopped
+
+    @property
+    def current(self):
+        return self.loaded[-1] if self.loaded else None
+
+    # -- helpers to simulate the user acting inside the VLC window ----------
+    def simulate_native_next(self):
+        """User pressed VLC's own Next: playlist advances to the duplicate id."""
+        self.plid += 1
+
+    def simulate_end(self):
+        """Media ended: VLC reports a stopped state."""
+        self.state = "stopped"
+
+
+class Clock:
+    """Manually-advanced monotonic clock."""
+
+    def __init__(self):
+        self.t = 1000.0
+
+    def __call__(self):
+        return self.t
+
+    def advance(self, seconds):
+        self.t += seconds
+
+
+@pytest.fixture
+def env(tmp_path):
+    """A state store, a real media folder, and a SlotManager wired to fakes."""
+    # Build a folder with several media files.
+    media_dir = tmp_path / "Thriller"
+    media_dir.mkdir()
+    files = []
+    for i in range(6):
+        p = media_dir / f"movie_{i}.mp4"
+        p.write_bytes(b"x")
+        files.append(str(p.resolve()))
+
+    state = StateStore(tmp_path / "state.db")
+    library = MediaLibrary()
+    clock = Clock()
+    fakes = {}
+
+    def factory(port):
+        fakes[port] = FakeVlc(port)
+        return fakes[port]
+
+    manager = SlotManager(state, library, factory, clock=clock)
+    yield state, library, manager, clock, fakes, media_dir, files
+    state.close()
+
+
+# -- classification --------------------------------------------------------
+
+def test_watched_goes_to_exclusion_only(env):
+    state, _, manager, clock, _, media_dir, _ = env
+    folder = state.add_folder("Thriller", str(media_dir))  # N=10, thr=60, toggle off
+    slot = manager.create_slot(folder.id)
+    watched = slot.current_file
+    assert watched is not None                       # initial load happened
+
+    clock.advance(120)                               # 120s >= 60 -> watched
+    result = manager.press_next(slot.slot_id)
+
+    assert result.classification is Classification.WATCHED
+    assert watched in state.get_excluded_paths(folder.id)
+    assert state.get_exclusions(folder.id)[watched] == 10
+    assert state.get_review_items(folder.id) == []   # NOT on review list
+
+
+def test_skipped_toggle_off_goes_to_review_only(env):
+    state, _, manager, clock, _, media_dir, _ = env
+    folder = state.add_folder("Thriller", str(media_dir))
+    slot = manager.create_slot(folder.id)
+    skipped = slot.current_file
+
+    clock.advance(5)                                 # 5s < 60 -> skipped
+    result = manager.press_next(slot.slot_id)
+
+    assert result.classification is Classification.SKIPPED
+    review = [r.file_path for r in state.get_review_items(folder.id)]
+    assert skipped in review                          # ALWAYS on review list
+    assert skipped not in state.get_excluded_paths(folder.id)  # toggle off -> not excluded
+
+
+def test_skipped_toggle_on_goes_to_both_lists(env):
+    state, _, manager, clock, _, media_dir, _ = env
+    folder = state.add_folder("Thriller", str(media_dir), exclude_skipped=True)
+    slot = manager.create_slot(folder.id)
+    skipped = slot.current_file
+
+    clock.advance(5)
+    manager.press_next(slot.slot_id)
+
+    review = [r.file_path for r in state.get_review_items(folder.id)]
+    assert skipped in review
+    assert skipped in state.get_excluded_paths(folder.id)  # on BOTH
+
+
+# -- exactly-N cooldown semantics -----------------------------------------
+
+def test_cooldown_lasts_exactly_n_future_presses(env):
+    """A watched file must sit out exactly N future presses, then be eligible."""
+    state, _, manager, clock, _, media_dir, files = env
+    N = 3
+    folder = state.add_folder("Thriller", str(media_dir), shuffle_count=N)
+    slot = manager.create_slot(folder.id)
+
+    # Force a known watched file X, then drive presses deterministically.
+    X = files[0]
+    slot.current_file = X
+    slot.load_monotonic = clock() - 120     # elapsed 120s -> watched on next press
+
+    r0 = manager.press_next(slot.slot_id)     # press 0: X watched, excluded=N
+    assert r0.classification is Classification.WATCHED
+    assert state.get_exclusions(folder.id)[X] == N        # count == 3 (not 2)
+
+    # Subsequent presses are quick (skipped, toggle off) so only X stays excluded.
+    clock.advance(1); manager.press_next(slot.slot_id)    # press 1: X 3->2
+    assert state.get_exclusions(folder.id).get(X) == 2
+    clock.advance(1); manager.press_next(slot.slot_id)    # press 2: X 2->1
+    assert state.get_exclusions(folder.id).get(X) == 1
+    clock.advance(1); r3 = manager.press_next(slot.slot_id)  # press 3: X 1->0 released
+    assert X not in state.get_excluded_paths(folder.id)
+    assert X in r3.released_files                          # eligible again on 3rd press
+
+
+# -- per-folder sharing across slots --------------------------------------
+
+def test_shared_folder_cooldown_decrements_across_slots(env):
+    state, _, manager, clock, _, media_dir, files = env
+    folder = state.add_folder("Thriller", str(media_dir), shuffle_count=10)
+    slot_a = manager.create_slot(folder.id)
+    slot_b = manager.create_slot(folder.id)      # second slot, SAME folder
+
+    # Exclude a known file via slot A watching it.
+    X = files[0]
+    slot_a.current_file = X
+    slot_a.load_monotonic = clock() - 120
+    manager.press_next(slot_a.slot_id)           # X excluded at 10
+    assert state.get_exclusions(folder.id)[X] == 10
+
+    # A Next on slot B (same folder) must decrement the shared cooldown.
+    clock.advance(1)
+    manager.press_next(slot_b.slot_id)
+    assert state.get_exclusions(folder.id)[X] == 9
+
+
+def test_slots_load_into_their_own_windows(env):
+    state, _, manager, clock, fakes, media_dir, _ = env
+    folder = state.add_folder("Thriller", str(media_dir))
+    slot_a = manager.create_slot(folder.id)
+    slot_b = manager.create_slot(folder.id)
+    fake_a = fakes[slot_a.port]
+    fake_b = fakes[slot_b.port]
+
+    before_b = len(fake_b.loaded)
+    clock.advance(120)
+    manager.press_next(slot_a.slot_id)           # act on slot A only
+
+    assert fake_a.current == slot_a.current_file # A advanced
+    assert len(fake_b.loaded) == before_b        # B untouched
+
+
+# -- edge cases ------------------------------------------------------------
+
+def test_empty_pool_when_all_excluded(env):
+    state, _, manager, clock, _, media_dir, files = env
+    folder = state.add_folder("Thriller", str(media_dir), shuffle_count=100)
+    slot = manager.create_slot(folder.id)
+    # Exclude every file with a long cooldown.
+    for f in files:
+        state.add_exclusion(folder.id, f, 100)
+    slot.current_file = None            # nothing to evaluate
+    slot.load_monotonic = None
+    result = manager.press_next(slot.slot_id)
+    assert result.status is NextStatus.EMPTY_POOL
+
+
+def test_no_folder_assigned(env):
+    state, _, manager, _, _, media_dir, _ = env
+    state.add_folder("Thriller", str(media_dir))
+    slot = manager.create_slot()        # no folder
+    result = manager.press_next(slot.slot_id)
+    assert result.status is NextStatus.NO_FOLDER
+
+
+def test_reassign_folder_switches_source(env):
+    state, _, manager, clock, _, tmp_media, _ = env
+    f1 = state.add_folder("Thriller", str(tmp_media))
+    # second folder
+    other = tmp_media.parent / "Comedy"
+    other.mkdir()
+    (other / "c0.mp4").write_bytes(b"x")
+    f2 = state.add_folder("Comedy", str(other))
+
+    slot = manager.create_slot(f1.id)
+    manager.assign_folder(slot.slot_id, f2.id)
+    assert slot.folder_id == f2.id
+    assert slot.current_file.endswith("c0.mp4")   # now sourcing from Comedy
+
+
+def test_close_slot_stops_vlc_and_frees_port(env):
+    state, _, manager, _, fakes, media_dir, _ = env
+    folder = state.add_folder("Thriller", str(media_dir))
+    slot = manager.create_slot(folder.id)
+    port = slot.port
+    fake = fakes[port]
+    manager.close_slot(slot.slot_id)
+    assert fake.stopped
+    assert manager.get_slot(slot.slot_id) is None
+    # Port should be reusable by a new slot.
+    new_slot = manager.create_slot(folder.id)
+    assert new_slot.port == port
+
+
+# -- native-control detection (VLC's own Next / end-of-media) --------------
+
+def test_poll_detects_native_next_and_autoadvances(env):
+    state, _, manager, clock, fakes, media_dir, _ = env
+    folder = state.add_folder("Thriller", str(media_dir))
+    slot = manager.create_slot(folder.id)
+    fake = fakes[slot.port]
+    loads_before = len(fake.loaded)
+
+    # Within the grace window, even a playlist change must NOT auto-advance.
+    fake.simulate_native_next()
+    assert manager.poll_and_maybe_advance(slot.slot_id) is None
+    assert len(fake.loaded) == loads_before
+
+    # Past the grace window, the native Next is detected and overridden.
+    clock.advance(2)
+    result = manager.poll_and_maybe_advance(slot.slot_id)
+    assert result is not None and result.status is NextStatus.OK
+    assert len(fake.loaded) == loads_before + 1   # a fresh file was loaded
+
+
+def test_poll_detects_end_of_media(env):
+    state, _, manager, clock, fakes, media_dir, _ = env
+    folder = state.add_folder("Thriller", str(media_dir))
+    slot = manager.create_slot(folder.id)
+    fake = fakes[slot.port]
+    loads_before = len(fake.loaded)
+
+    clock.advance(2)
+    fake.simulate_end()                            # media finished -> stopped
+    result = manager.poll_and_maybe_advance(slot.slot_id)
+    assert result is not None and result.status is NextStatus.OK
+    assert len(fake.loaded) == loads_before + 1
+
+
+def test_poll_no_trigger_while_playing_unchanged(env):
+    """Seeking/pausing keep the playlist id — the poller must not auto-advance."""
+    state, _, manager, clock, fakes, media_dir, _ = env
+    folder = state.add_folder("Thriller", str(media_dir))
+    slot = manager.create_slot(folder.id)
+    fake = fakes[slot.port]
+    loads_before = len(fake.loaded)
+
+    clock.advance(30)                              # plenty past grace, id unchanged
+    assert manager.poll_and_maybe_advance(slot.slot_id) is None
+    assert len(fake.loaded) == loads_before
+
+
+# -- Personal Algorithm integration ---------------------------------------
+
+def test_tracking_runs_even_when_algorithm_off(env):
+    """Affinity + Rediscovery are written on every Next press, toggle OFF."""
+    state, _, manager, clock, _, media_dir, _ = env
+    folder = state.add_folder("Thriller", str(media_dir))  # personal_algorithm OFF
+    slot = manager.create_slot(folder.id)
+    watched = slot.current_file
+
+    clock.advance(400)                             # >= a reward tier and >= threshold -> WATCHED
+    manager.press_next(slot.slot_id)
+
+    # Watched file gained Affinity; newly-picked file had its Rediscovery reset.
+    assert state.get_preference(folder.id, watched).affinity_score > 0
+    picked = slot.current_file
+    assert state.get_preference(folder.id, picked).last_selected_at is not None
+
+
+def test_initial_load_does_not_touch_preferences(env):
+    """assign_folder/_initial_load must not create or mutate any preference row."""
+    state, _, manager, _, _, media_dir, _ = env
+    folder = state.add_folder("Thriller", str(media_dir))
+    manager.create_slot(folder.id)                 # triggers the initial load
+    assert state.get_preferences_for_folder(folder.id) == {}
+
+
+def test_skip_penalty_reduces_affinity_floored_at_zero(env):
+    state, _, manager, clock, _, media_dir, files = env
+    folder = state.add_folder("Thriller", str(media_dir), skip_threshold=60)
+    slot = manager.create_slot(folder.id)
+
+    # First, watch the current file long enough to earn affinity.
+    X = slot.current_file
+    clock.advance(700)
+    manager.press_next(slot.slot_id)
+    earned = state.get_preference(folder.id, X).affinity_score
+    assert earned > 0
+
+    # Now force X back as current and skip it: affinity must drop but stay >= 0.
+    slot.current_file = X
+    slot.load_monotonic = clock() - 5              # elapsed 5s < 60 -> SKIPPED
+    manager.press_next(slot.slot_id)
+    after = state.get_preference(folder.id, X).affinity_score
+    assert 0 <= after < earned
+
+
+def test_algorithm_on_selects_and_still_tracks(env):
+    state, _, manager, clock, _, media_dir, _ = env
+    folder = state.add_folder("Thriller", str(media_dir), personal_algorithm=True)
+    slot = manager.create_slot(folder.id)
+    clock.advance(5)
+    result = manager.press_next(slot.slot_id)
+    assert result.status is NextStatus.OK
+    assert slot.current_file is not None
+    assert state.get_preference(folder.id, slot.current_file).last_selected_at is not None
+
+
+def test_switching_on_midsession_preserves_prior_history(env):
+    """The key behaviour: history accrued while OFF is used immediately when ON."""
+    state, _, manager, clock, _, media_dir, _ = env
+    folder = state.add_folder("Thriller", str(media_dir))  # OFF
+    slot = manager.create_slot(folder.id)
+
+    for _ in range(3):                             # accumulate affinity while OFF
+        clock.advance(700)
+        manager.press_next(slot.slot_id)
+    before = state.get_preferences_for_folder(folder.id)
+    total_before = sum(p.affinity_score for p in before.values())
+    assert total_before > 0
+
+    state.update_folder(folder.id, personal_algorithm=True)   # flip ON
+
+    after = state.get_preferences_for_folder(folder.id)
+    assert sum(p.affinity_score for p in after.values()) == total_before  # no reset/backfill
+
+    clock.advance(700)                             # a weighted press now works fine
+    result = manager.press_next(slot.slot_id)
+    assert result.status in (NextStatus.OK, NextStatus.EMPTY_POOL)
