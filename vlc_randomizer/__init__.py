@@ -23,4 +23,4 @@ Module map (dependency order, low-level first):
 See docs/DEVELOPER.md for architecture, schema, and communication flow.
 """
 
-__version__ = "1.0.0"
+__version__ = "1.4.0"

@@ -89,16 +89,22 @@ class SlotWidget(QWidget):
         self._file_label.setWordWrap(True)
         inner.addWidget(self._file_label)
 
-        # Meta chips: elapsed + live watched/skip status.
+        # Meta chips: elapsed + live watched/skip status, and the favorite heart.
         self._elapsed_chip = QLabel("IDLE")
         self._elapsed_chip.setObjectName("chip")
         self._status_chip = QLabel("")
         self._status_chip.setObjectName("chip")
+        self._fav_btn = QPushButton("♡")
+        self._fav_btn.setObjectName("favBtn")
+        self._fav_btn.setCursor(Qt.PointingHandCursor)
+        self._fav_btn.clicked.connect(self._on_toggle_favorite)
+        self._fav_btn.setVisible(False)  # only shown when a movie is loaded
         meta = QHBoxLayout()
         meta.setSpacing(8)
         meta.addWidget(self._elapsed_chip)
         meta.addWidget(self._status_chip)
         meta.addStretch(1)
+        meta.addWidget(self._fav_btn)
         inner.addLayout(meta)
 
         # The hero Next button, wrapped in its hard shadow.
@@ -219,6 +225,31 @@ class SlotWidget(QWidget):
     def _update_current_file(self) -> None:
         current = self._slot.current_file
         self._file_label.setText(os.path.basename(current) if current else "—")
+        self._update_favorite_button()
+
+    # -- favorites ---------------------------------------------------------
+
+    def _on_toggle_favorite(self) -> None:
+        current = self._slot.current_file
+        if not current:
+            return
+        self._context.toggle_favorite(current, self._slot.folder_id)
+        self._update_favorite_button()
+
+    def _update_favorite_button(self) -> None:
+        """Show the heart only while a movie is loaded, filled if it's a favorite."""
+        current = self._slot.current_file
+        if not current:
+            self._fav_btn.setVisible(False)
+            return
+        is_fav = self._context.is_favorite(current)
+        self._fav_btn.setVisible(True)
+        self._fav_btn.setText("♥" if is_fav else "♡")
+        self._fav_btn.setToolTip(
+            "Remove from Favorites" if is_fav else "Add to Favorites"
+        )
+        self._fav_btn.setProperty("fav", "on" if is_fav else "off")
+        _restyle(self._fav_btn)
 
     def _set_status_chip(self, object_name: str, text: str) -> None:
         if self._status_chip.objectName() != object_name:

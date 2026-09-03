@@ -239,3 +239,60 @@ def test_preferences_persist_across_reopen(tmp_path):
     p = s2.get_preference(f.id, "a.mp4")
     assert p.affinity_score == 5.5 and p.last_selected_at == 4242.0
     s2.close()
+
+
+# -- Favorites -------------------------------------------------------------
+
+def test_ensure_favorites_folder_is_idempotent(store):
+    f1 = store.ensure_favorites_folder()
+    f2 = store.ensure_favorites_folder()
+    assert f1.is_favorites is True
+    assert f1.id == f2.id                              # not duplicated
+    favs = [f for f in store.get_folders() if f.is_favorites]
+    assert len(favs) == 1                              # exactly one virtual genre
+
+
+def test_normal_folder_is_not_favorites(store):
+    f = store.add_folder("Thriller", r"C:\media\Thriller")
+    assert f.is_favorites is False
+
+
+def test_favorite_add_toggle_and_query(two_folders):
+    store, f1, f2 = two_folders
+    assert store.is_favorite("a.mp4") is False
+    store.add_favorite("a.mp4", f1.id)
+    assert store.is_favorite("a.mp4") is True
+    assert store.get_favorite_paths() == {"a.mp4"}
+    # Toggle off then on.
+    assert store.toggle_favorite("a.mp4") is False     # removed
+    assert store.get_favorite_paths() == set()
+    assert store.toggle_favorite("b.mp4", f2.id) is True
+    assert store.get_favorite_paths() == {"b.mp4"}
+
+
+def test_favorite_is_global_and_idempotent(two_folders):
+    store, f1, _ = two_folders
+    store.add_favorite("a.mp4", f1.id)
+    store.add_favorite("a.mp4", f1.id)                 # re-add = no duplicate
+    assert store.get_favorite_paths() == {"a.mp4"}
+
+
+def test_favorites_survive_origin_folder_removal(two_folders):
+    """Removing a genre keeps its favorites (ON DELETE SET NULL), not cascade."""
+    store, f1, _ = two_folders
+    store.add_favorite("keep.mp4", f1.id)
+    store.remove_folder(f1.id)
+    assert store.get_favorite_paths() == {"keep.mp4"}  # still a favorite
+
+
+def test_favorites_persist_across_reopen(tmp_path):
+    db = tmp_path / "favs.db"
+    s1 = StateStore(db)
+    fav_folder = s1.ensure_favorites_folder()
+    f = s1.add_folder("A", r"C:\media\A")
+    s1.add_favorite("a.mp4", f.id)
+    s1.close()
+    s2 = StateStore(db)
+    assert s2.get_favorite_paths() == {"a.mp4"}
+    assert s2.ensure_favorites_folder().id == fav_folder.id  # still the same one
+    s2.close()

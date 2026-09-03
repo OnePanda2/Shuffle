@@ -19,6 +19,12 @@ files don't repeat too soon.
   thing** — the app detects it and jumps to a fresh random pick automatically.
 - Watched files enter a **cooldown** (excluded for the next *N* Next-presses in
   that folder). Quickly-skipped files go to a per-folder **Review/Delete list**.
+  Pressing **Next always moves to a different file** — it never re-serves the one
+  you were just watching.
+- A **♥ Favorite** button on each slot (shown while a movie is loaded) adds the
+  current movie to your **Favorites** — a permanent, built-in genre that plays
+  only favorited movies. Favorited movies also get a gentle **priority** whenever
+  their own genre plays. Click the filled heart again to un-favorite.
 - Multiple slots can share the same folder (shared history, separate windows).
 - Everything is local (`127.0.0.1`) and works with Wi-Fi off.
 - A bold neo-brutalist look with a **dark / light toggle** (☾ / ☀ in the top bar);
@@ -70,7 +76,10 @@ the app at `vlc.exe`.
    cooldown (default off).
 5. **Review List** lets you permanently delete (to the Recycle Bin) or drop
    skipped files.
-6. **Close Slot** closes that VLC window. Open and close slots from the app (use
+6. **♥ Favorite**: while a movie is loaded, click the heart on its slot to add it
+   to Favorites. Assign a slot to the **❤ Favorites** genre to play only
+   favorited movies. Un-heart to remove.
+7. **Close Slot** closes that VLC window. Open and close slots from the app (use
    its *Close Slot* button rather than VLC's own window-close button).
 
 ## Testing

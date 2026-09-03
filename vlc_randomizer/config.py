@@ -78,6 +78,13 @@ REDISCOVERY_WEIGHT_MULTIPLIER = 1.0  # placeholder
 # has a non-zero, non-deterministic selection probability. Do not remove or zero this.
 BASE_WEIGHT = 1.0  # placeholder
 
+# Flat bonus added to a FAVORITED file's selection weight in its own genre. This is
+# what gives favorites "priority" when a normal genre is played, and it is applied on
+# top of BASE_WEIGHT regardless of the Personal Algorithm toggle. Kept as a bonus (not
+# a hard rule) so favorites are merely more likely, never guaranteed, and non-favorites
+# never drop to a zero chance. Larger => favorites dominate more.
+FAVORITE_WEIGHT_BONUS = 2.0  # placeholder
+
 # --- Native-control detection --------------------------------------------
 # When the user presses VLC's own Next/Previous button or a file ends, the app
 # detects it (by a change in VLC's current playlist id) and auto-advances to a

@@ -133,6 +133,15 @@ def build_qss(p: dict) -> str:
     QPushButton#nextBtn:hover {{ background: {p['blue_deep']}; }}
     QPushButton#nextBtn:pressed {{ margin: 5px 0 0 5px; }}
 
+    /* favorite (heart) toggle on each slot */
+    QPushButton#favBtn {{
+        background: {p['paper']}; color: {p['coral']};
+        border: 2px solid {p['ink']}; border-radius: 999px;
+        font-size: 16px; font-weight: 900; padding: 3px 11px; min-width: 18px;
+    }}
+    QPushButton#favBtn:hover {{ background: {p['hover']}; }}
+    QPushButton#favBtn[fav="on"] {{ background: {p['coral']}; color: {p['on_coral']}; }}
+
     /* small per-slot action buttons */
     QPushButton#slotAction {{ font-size: 10px; padding: 8px 4px; border-radius: 5px; }}
     QPushButton#dangerAction {{ font-size: 10px; padding: 8px 4px; border-radius: 5px;

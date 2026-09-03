@@ -29,10 +29,13 @@ class FolderEditDialog(QDialog):
                  folder: Optional[Folder] = None) -> None:
         super().__init__(parent)
         self._folder = folder
+        self._is_favorites = bool(folder and folder.is_favorites)
         self.setWindowTitle("Edit Folder" if folder else "Add Folder")
         self.setMinimumWidth(460)
 
         self._name = QLineEdit(folder.name if folder else "")
+        # The Favorites genre has no folder on disk; keep its sentinel path but
+        # never expose it for editing.
         self._path = QLineEdit(folder.path if folder else "")
         browse = QPushButton("Browse…")
         browse.clicked.connect(self._browse)
@@ -76,7 +79,13 @@ class FolderEditDialog(QDialog):
 
         form = QFormLayout()
         form.addRow("Name:", self._name)
-        form.addRow("Folder:", path_widget)
+        if self._is_favorites:
+            # Virtual genre: no on-disk path to edit, just a note in its place.
+            note = QLabel("Virtual genre — plays only your favorited movies.")
+            note.setWordWrap(True)
+            form.addRow("Folder:", note)
+        else:
+            form.addRow("Folder:", path_widget)
         form.addRow("Shuffle count (N):", self._shuffle)
         form.addRow("Skip threshold:", self._threshold)
         form.addRow("", self._exclude_skipped)
@@ -198,7 +207,8 @@ class SettingsDialog(QDialog):
     def _reload_folders(self) -> None:
         self._folder_list.clear()
         for folder in self._context.state.get_folders():
-            item = QListWidgetItem(f"{folder.name}   —   {folder.path}")
+            location = "your favorited movies" if folder.is_favorites else folder.path
+            item = QListWidgetItem(f"{folder.name}   —   {location}")
             item.setData(256, folder.id)  # Qt.UserRole == 256
             self._folder_list.addItem(item)
 
@@ -251,6 +261,13 @@ class SettingsDialog(QDialog):
         if folder_id is None:
             return
         folder = self._context.state.get_folder(folder_id)
+        if folder.is_favorites:
+            QMessageBox.information(
+                self, "Can't remove",
+                "The Favorites genre is permanent and can't be removed. "
+                "Un-heart movies to take them out of it.",
+            )
+            return
         confirm = QMessageBox.question(
             self, "Remove folder",
             f"Remove '{folder.name}' and all of its history?\n"

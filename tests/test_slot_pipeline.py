@@ -393,3 +393,112 @@ def test_switching_on_midsession_preserves_prior_history(env):
     clock.advance(700)                             # a weighted press now works fine
     result = manager.press_next(slot.slot_id)
     assert result.status in (NextStatus.OK, NextStatus.EMPTY_POOL)
+
+
+# -- skip-repeat bug fix ---------------------------------------------------
+
+def test_next_never_returns_the_just_skipped_file(env):
+    """Regression: a single Next after a skip must move to a DIFFERENT file.
+
+    Skipped files (toggle off) are not put on the persistent cooldown, so the
+    draw used to be able to re-pick the file just skipped. Next must never hand
+    back the currently-playing file.
+    """
+    state, _, manager, clock, _, media_dir, files = env
+    folder = state.add_folder("Thriller", str(media_dir))  # toggle off, default
+    slot = manager.create_slot(folder.id)
+
+    X = files[0]
+    slot.current_file = X
+    slot.load_monotonic = clock() - 5              # 5s < 60 -> SKIPPED
+    result = manager.press_next(slot.slot_id)
+
+    assert result.classification is Classification.SKIPPED
+    assert result.status is NextStatus.OK
+    assert result.selected_file != X               # not the file we just skipped
+    assert slot.current_file != X
+
+
+def test_repeated_next_never_repeats_consecutively(env):
+    """Across many quick skips, no two consecutive picks are the same file."""
+    state, _, manager, clock, _, media_dir, _ = env
+    folder = state.add_folder("Thriller", str(media_dir))
+    slot = manager.create_slot(folder.id)
+
+    prev = slot.current_file
+    for _ in range(25):
+        clock.advance(2)                           # quick -> skipped, nothing persists
+        result = manager.press_next(slot.slot_id)
+        assert result.status is NextStatus.OK
+        assert result.selected_file != prev        # always advances to a new file
+        prev = result.selected_file
+
+
+def test_single_file_folder_can_still_replay(env):
+    """The no-repeat guard must not stall a folder that has only one file."""
+    state, library, manager, clock, _, media_dir, _ = env
+    lone = media_dir.parent / "Solo"
+    lone.mkdir()
+    only = str((lone / "only.mp4").resolve())
+    (lone / "only.mp4").write_bytes(b"x")
+    folder = state.add_folder("Solo", str(lone))
+    slot = manager.create_slot(folder.id)
+    assert slot.current_file == only
+
+    clock.advance(2)
+    result = manager.press_next(slot.slot_id)      # nothing else to pick
+    assert result.status is NextStatus.OK
+    assert result.selected_file == only            # falls back to the lone file
+
+
+# -- Favorites genre -------------------------------------------------------
+
+def test_favorites_genre_plays_only_favorites(env):
+    """A slot on the virtual Favorites genre plays only favorited files."""
+    state, _, manager, clock, _, media_dir, files = env
+    genre = state.add_folder("Thriller", str(media_dir))
+    fav_folder = state.ensure_favorites_folder()
+
+    # Favorite three of the six files.
+    favs = set(files[:3])
+    for p in favs:
+        state.add_favorite(p, genre.id)
+
+    slot = manager.create_slot(fav_folder.id)
+    assert slot.current_file in favs               # initial load is a favorite
+
+    for _ in range(15):
+        clock.advance(2)
+        result = manager.press_next(slot.slot_id)
+        if result.status is NextStatus.OK:
+            assert result.selected_file in favs    # only ever plays favorites
+
+
+def test_favorites_genre_empty_when_nothing_favorited(env):
+    state, _, manager, _, _, media_dir, _ = env
+    state.add_folder("Thriller", str(media_dir))
+    fav_folder = state.ensure_favorites_folder()
+    slot = manager.create_slot(fav_folder.id)
+    # No favorites yet -> nothing to load.
+    assert slot.current_file is None
+    result = manager.press_next(slot.slot_id)
+    assert result.status is NextStatus.EMPTY_POOL
+
+
+def test_favorite_in_normal_genre_gets_picked(env):
+    """A favorited file keeps a (boosted) presence when its own genre plays."""
+    state, _, manager, clock, _, media_dir, files = env
+    genre = state.add_folder("Thriller", str(media_dir))
+    state.add_favorite(files[0], genre.id)         # one favorite in a 6-file genre
+    slot = manager.create_slot(genre.id)
+
+    seen = set()
+    for _ in range(60):
+        clock.advance(2)                           # quick skips: nothing persists
+        result = manager.press_next(slot.slot_id)
+        if result.selected_file:
+            seen.add(result.selected_file)
+    # The favorite (weight 3 vs 1) is overwhelmingly likely to appear; and the
+    # genre still surfaces other files too (no starvation).
+    assert files[0] in seen
+    assert len(seen) > 1

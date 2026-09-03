@@ -35,7 +35,7 @@ from typing import Callable, Optional
 from . import preference_engine
 from .config import AUTO_ADVANCE_GRACE_SECONDS, HTTP_PORT_BASE, MAX_SLOTS
 from .media_library import MediaLibrary
-from .selection_engine import build_eligible_pool, select
+from .selection_engine import build_eligible_pool, pick_uniform
 from .state_store import StateStore
 from .vlc_controller import VlcError, VlcInstance
 
@@ -177,7 +177,7 @@ class SlotManager:
         slot.current_file = None
         slot.load_monotonic = None
         folder = self._state.get_folder(folder_id)
-        self._initial_load(slot, folder.path, folder_id)
+        self._initial_load(slot, folder)
         return slot
 
     def close_slot(self, slot_id: int) -> None:
@@ -251,19 +251,26 @@ class SlotManager:
             self._state.add_exclusion(folder.id, previous, folder.shuffle_count)
 
         # STEP 6 — build the eligible pool: folder files, on disk, not excluded.
-        files = self._library.get_files(folder.path)
+        files = self._folder_files(folder)
         excluded = self._state.get_excluded_paths(folder.id)
 
-        # STEP 7 — pick one file from the eligible pool. This is the ONLY step
-        # whose behaviour the Personal Algorithm toggle changes: pure uniform when
-        # OFF (unchanged code path), weighted when ON. Everything else in this
-        # pipeline is identical regardless of the toggle.
-        if folder.personal_algorithm:
-            pool = build_eligible_pool(files, excluded)
-            preferences = self._state.get_preferences_for_folder(folder.id)
-            choice = preference_engine.select_weighted(pool, preferences, now=time.time())
-        else:
-            choice = select(files, excluded)  # existing pure-uniform path, unchanged
+        # BUGFIX — never hand back the file that was just playing. Pressing Next
+        # (or a native advance) must always move to a DIFFERENT file. A *watched*
+        # file is already on the exclusion list by now, but a *skipped* file is
+        # intentionally NOT (that stays gated by exclude_skipped), so without this
+        # guard the draw could immediately re-pick the file you just skipped — the
+        # "had to press Next 2-3 times before it changed" bug. We exclude it for
+        # THIS pick only; nothing is persisted, so cooldown semantics are untouched.
+        pick_excluded = excluded | {previous} if previous is not None else excluded
+
+        # STEP 7 — pick one file. The Personal Algorithm toggle and favorites both
+        # feed into this single selection seam (see _select_for_folder).
+        choice = self._select_for_folder(folder, files, pick_excluded)
+        if choice is None and previous is not None:
+            # Excluding the just-played file emptied the pool (e.g. a single-file
+            # folder, or everything else on cooldown): allow it back rather than
+            # stalling, so a lone file can still replay.
+            choice = self._select_for_folder(folder, files, excluded)
         if choice is None:
             # Nothing eligible: keep the window as-is but stop tracking the old
             # file so the next press does not re-evaluate it.
@@ -314,11 +321,47 @@ class SlotManager:
         new_score = preference_engine.apply_affinity_delta(current.affinity_score, delta)
         self._state.update_affinity(folder_id, file_path, new_score)
 
-    def _initial_load(self, slot: Slot, folder_path: str, folder_id: int) -> Optional[str]:
+    def _folder_files(self, folder) -> list[str]:
+        """Return the media files a folder plays from.
+
+        A normal genre reads the cached recursive disk scan. The virtual Favorites
+        genre has no folder on disk — its "files" are the favorited paths from the
+        favorites table (existence-filtered downstream by the selection engine).
+        """
+        if folder.is_favorites:
+            return list(self._state.get_favorite_paths())
+        return self._library.get_files(folder.path)
+
+    def _select_for_folder(self, folder, files, excluded) -> Optional[str]:
+        """Pick one eligible file, applying favorite priority and, if enabled, the
+        Personal Algorithm — otherwise a plain uniform draw.
+
+        Selection paths:
+        * Personal Algorithm ON  -> weighted by Affinity + Rediscovery + favorites.
+        * Algorithm OFF, favorites present in the pool -> weighted by favorites only
+          (favorited files get a bonus; everything else stays at BASE_WEIGHT).
+        * Algorithm OFF, no favorites in the pool -> pure uniform (unchanged).
+        """
+        pool = build_eligible_pool(files, excluded)
+        if not pool:
+            return None
+        favorites = self._state.get_favorite_paths()
+        personalize = folder.personal_algorithm
+        if personalize or (favorites & set(pool)):
+            preferences = (
+                self._state.get_preferences_for_folder(folder.id) if personalize else {}
+            )
+            return preference_engine.select_weighted(
+                pool, preferences, now=time.time(),
+                favorites=favorites, personalize=personalize,
+            )
+        return pick_uniform(pool)
+
+    def _initial_load(self, slot: Slot, folder) -> Optional[str]:
         """Pick and load one random eligible file with no evaluation/mutation."""
-        files = self._library.get_files(folder_path)
-        excluded = self._state.get_excluded_paths(folder_id)
-        choice = select(files, excluded)
+        files = self._folder_files(folder)
+        excluded = self._state.get_excluded_paths(folder.id)
+        choice = self._select_for_folder(folder, files, excluded)
         if choice is None:
             slot.current_file = None
             slot.load_monotonic = None

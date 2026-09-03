@@ -162,3 +162,43 @@ def test_select_weighted_uniform_when_no_preferences():
         counts[select_weighted(pool, {}, now=1000.0, rng=rng)] += 1
     # Every file within a loose band of the uniform expectation (4000).
     assert all(2800 < c < 5200 for c in counts.values())
+
+
+# -- favorites priority ----------------------------------------------------
+
+def test_favorite_adds_bonus_to_weight():
+    plain = compute_weight(compute_contributions(0.0, 0.0, is_favorite=False))
+    fav = compute_weight(compute_contributions(0.0, 0.0, is_favorite=True))
+    assert fav == plain + config.FAVORITE_WEIGHT_BONUS
+    assert fav > plain
+
+
+def test_favorite_contribution_present_and_named():
+    names = [n for n, _ in compute_contributions(0.0, 0.0, is_favorite=True)]
+    assert "favorite" in names
+
+
+def test_favorites_get_priority_without_personalization():
+    """A favorite is picked disproportionately more, yet nothing starves, even
+    with the Personal Algorithm off (personalize=False)."""
+    pool = [f"f{i}" for i in range(5)]
+    favorites = {"f0"}
+    rng = random.Random(4242)
+    counts = {p: 0 for p in pool}
+    for _ in range(30_000):
+        pick = select_weighted(pool, {}, now=1000.0, favorites=favorites,
+                               personalize=False, rng=rng)
+        counts[pick] += 1
+    others_avg = sum(counts[p] for p in pool if p != "f0") / 4
+    assert counts["f0"] > others_avg          # favored
+    assert all(c > 0 for c in counts.values())  # but no eligible file starves
+
+
+def test_no_favorites_personalize_false_is_uniform():
+    """personalize=False with no favorites == plain uniform weights."""
+    pool = [f"f{i}" for i in range(4)]
+    rng = random.Random(11)
+    counts = {p: 0 for p in pool}
+    for _ in range(16_000):
+        counts[select_weighted(pool, {}, now=1000.0, personalize=False, rng=rng)] += 1
+    assert all(3200 < c < 4800 for c in counts.values())

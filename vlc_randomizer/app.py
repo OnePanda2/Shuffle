@@ -36,6 +36,10 @@ class AppContext:
         self.state = StateStore(paths.db_path)
         self.library = MediaLibrary()
 
+        # The Favorites genre is a permanent virtual folder; create it once so it
+        # is always available to assign to a slot.
+        self.favorites_folder = self.state.ensure_favorites_folder()
+
         # Seed the VLC path once from auto-detection if the user hasn't set it.
         if self.state.get_setting(SETTING_VLC_PATH) is None:
             detected = detect_vlc_path()
@@ -67,6 +71,13 @@ class AppContext:
 
     def set_theme(self, name: str) -> None:
         self.state.set_setting(SETTING_THEME, name)
+
+    def toggle_favorite(self, file_path: str, folder_id: int | None = None) -> bool:
+        """Add/remove a file from Favorites. Returns the new state (True=favorite)."""
+        return self.state.toggle_favorite(file_path, folder_id)
+
+    def is_favorite(self, file_path: str) -> bool:
+        return self.state.is_favorite(file_path)
 
     def rescan_folder(self, folder_id: int) -> int:
         """Rescan a folder's files, returning the new file count."""

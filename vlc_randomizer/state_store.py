@@ -58,7 +58,8 @@ CREATE TABLE IF NOT EXISTS folders (
     skip_threshold     INTEGER NOT NULL,
     exclude_skipped    INTEGER NOT NULL,           -- 0/1 boolean
     created_at         REAL    NOT NULL,
-    personal_algorithm INTEGER NOT NULL DEFAULT 0  -- 0/1 boolean; weighted selection on
+    personal_algorithm INTEGER NOT NULL DEFAULT 0, -- 0/1 boolean; weighted selection on
+    is_favorites       INTEGER NOT NULL DEFAULT 0  -- 0/1; the one virtual Favorites genre
 );
 
 CREATE TABLE IF NOT EXISTS exclusion_list (
@@ -99,7 +100,24 @@ CREATE TABLE IF NOT EXISTS media_preferences (
     UNIQUE(folder_id, file_path)
 );
 CREATE INDEX IF NOT EXISTS idx_media_prefs_folder ON media_preferences(folder_id);
+
+-- Favorites: the user's curated list. One row per favorited file (UNIQUE by path,
+-- so a movie is favorited once, globally). folder_id records the origin genre the
+-- file was favorited from and is ON DELETE SET NULL so removing a genre keeps its
+-- favorites (they still play in the Favorites genre; the file on disk is untouched).
+CREATE TABLE IF NOT EXISTS favorites (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    folder_id  INTEGER REFERENCES folders(id) ON DELETE SET NULL,
+    file_path  TEXT    NOT NULL UNIQUE,
+    added_at   REAL    NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_favorites_folder ON favorites(folder_id);
 """
+
+# The single virtual Favorites genre. Its path is a sentinel that is never scanned
+# on disk; its file list comes from the favorites table instead.
+FAVORITES_FOLDER_NAME = "❤ Favorites"
+FAVORITES_FOLDER_PATH = "<favorites>"
 
 
 @dataclass
@@ -113,6 +131,7 @@ class Folder:
     exclude_skipped: bool
     created_at: float
     personal_algorithm: bool = False  # weighted (vs pure uniform) selection
+    is_favorites: bool = False        # True only for the virtual Favorites genre
 
 
 @dataclass
@@ -178,6 +197,7 @@ class StateStore:
         with self._lock:
             self._conn.executescript(_SCHEMA)
             self._migrate_folders_personal_algorithm()
+            self._migrate_folders_is_favorites()
             self._conn.execute(
                 "INSERT OR IGNORE INTO schema_meta(key, value) VALUES('version', ?)",
                 (str(SCHEMA_VERSION),),
@@ -202,6 +222,24 @@ class StateStore:
         except sqlite3.OperationalError as exc:
             if "duplicate column" not in str(exc).lower():
                 raise  # only swallow the 'already exists' case; surface anything else
+
+    def _migrate_folders_is_favorites(self) -> None:
+        """Additively add the is_favorites column to an existing folders table.
+
+        Same rationale/pattern as _migrate_folders_personal_algorithm: the CREATE
+        IF NOT EXISTS never adds a column to a pre-existing table, so this ALTER
+        backfills it for older databases; the 'duplicate column' error on a DB that
+        already has it is a safe no-op.
+        """
+        try:
+            self._conn.execute(
+                "ALTER TABLE folders ADD COLUMN "
+                "is_favorites INTEGER NOT NULL DEFAULT 0"
+            )
+            self._conn.commit()
+        except sqlite3.OperationalError as exc:
+            if "duplicate column" not in str(exc).lower():
+                raise
 
     def close(self) -> None:
         with self._lock:
@@ -306,7 +344,78 @@ class StateStore:
             exclude_skipped=bool(row["exclude_skipped"]),
             created_at=row["created_at"],
             personal_algorithm=bool(row["personal_algorithm"]),
+            is_favorites=bool(row["is_favorites"]),
         )
+
+    # -- favorites folder (the one virtual genre) -------------------------
+
+    def ensure_favorites_folder(self) -> Folder:
+        """Return the virtual Favorites genre, creating it once if absent.
+
+        Idempotent: a second launch finds the existing row and returns it. The
+        row is a normal folders record (so it carries its own settings and its own
+        independent history) flagged with is_favorites=1 and a sentinel path that
+        is never scanned on disk.
+        """
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM folders WHERE is_favorites = 1 LIMIT 1"
+            ).fetchone()
+            if row is not None:
+                return self._row_to_folder(row)
+            cur = self._conn.execute(
+                """INSERT INTO folders
+                   (name, path, shuffle_count, skip_threshold, exclude_skipped,
+                    created_at, personal_algorithm, is_favorites)
+                   VALUES (?, ?, ?, ?, ?, ?, 0, 1)""",
+                (FAVORITES_FOLDER_NAME, FAVORITES_FOLDER_PATH, DEFAULT_SHUFFLE_COUNT,
+                 DEFAULT_SKIP_THRESHOLD, int(DEFAULT_EXCLUDE_SKIPPED), time.time()),
+            )
+            self._conn.commit()
+            return self.get_folder(cur.lastrowid)  # type: ignore[arg-type]
+
+    # -- favorites list ---------------------------------------------------
+
+    def add_favorite(self, file_path: str, folder_id: Optional[int] = None) -> None:
+        """Mark a file as a favorite (idempotent; records its origin genre)."""
+        with self._lock:
+            self._conn.execute(
+                """INSERT INTO favorites (folder_id, file_path, added_at)
+                   VALUES (?, ?, ?)
+                   ON CONFLICT(file_path)
+                   DO UPDATE SET folder_id = excluded.folder_id""",
+                (folder_id, file_path, time.time()),
+            )
+            self._conn.commit()
+
+    def remove_favorite(self, file_path: str) -> None:
+        """Un-favorite a file (the file on disk is untouched)."""
+        with self._lock:
+            self._conn.execute(
+                "DELETE FROM favorites WHERE file_path = ?", (file_path,)
+            )
+            self._conn.commit()
+
+    def toggle_favorite(self, file_path: str, folder_id: Optional[int] = None) -> bool:
+        """Flip a file's favorite state. Returns the NEW state (True = now favorite)."""
+        if self.is_favorite(file_path):
+            self.remove_favorite(file_path)
+            return False
+        self.add_favorite(file_path, folder_id)
+        return True
+
+    def is_favorite(self, file_path: str) -> bool:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT 1 FROM favorites WHERE file_path = ?", (file_path,)
+            ).fetchone()
+        return row is not None
+
+    def get_favorite_paths(self) -> set[str]:
+        """Return the set of all favorited file paths (across every genre)."""
+        with self._lock:
+            rows = self._conn.execute("SELECT file_path FROM favorites").fetchall()
+        return {r["file_path"] for r in rows}
 
     # -- exclusion list (temporary cooldown) ------------------------------
 

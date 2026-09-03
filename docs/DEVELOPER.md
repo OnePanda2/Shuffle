@@ -114,9 +114,24 @@ app_settings                           -- global key/value (e.g. vlc_path)
   key   TEXT PK
   value TEXT
 
+favorites                              -- the user's curated Favorites list
+  id         INTEGER PK
+  folder_id  INTEGER FK -> folders(id) ON DELETE SET NULL  -- origin genre
+  file_path  TEXT UNIQUE                                   -- favorited once, globally
+  added_at   REAL
+
 schema_meta                            -- schema version for future migrations
   key TEXT PK, value TEXT
 ```
+
+The **Favorites genre** is a single row in `folders` with `is_favorites = 1` and a
+sentinel `path` (`<favorites>`) that is never scanned on disk; its file list comes
+from the `favorites` table instead. It is created once on startup
+(`StateStore.ensure_favorites_folder`) and cannot be removed from the UI. It carries
+its own settings and its own independent history like any other folder.
+
+`favorites.folder_id` is `ON DELETE SET NULL` (not cascade) so removing a genre keeps
+its favorited files — they still play in the Favorites genre.
 
 All history state is scoped by `folder_id`; deleting a folder cascades to *its*
 rows only, guaranteeing per-folder isolation. `remaining_count` is a countdown,
@@ -137,9 +152,17 @@ Scoped to one slot; the crux of the project.
    *(Steps 2/3's list writes are applied after step 4/5's tick — see §2.)*
 4. **Decrement** every pre-existing excluded file's count by 1 (this folder only).
 5. **Release** any file whose count reached 0 (delete from exclusion list).
-6. **Build the eligible pool**: folder files (cached scan) that exist on disk and
-   are not currently excluded.
-7. **Pick one** uniformly at random from that exact pool.
+6. **Build the eligible pool**: folder files (cached scan; for the Favorites genre,
+   the favorited paths instead) that exist on disk and are not currently excluded.
+   The **just-played file is also excluded from this one pick** so a single Next
+   always advances to a different file — a *skipped* file is not on the persistent
+   cooldown, so without this it could be re-served immediately (the "press Next 2-3
+   times" bug). If that leaves the pool empty (e.g. a single-file folder) the guard
+   is dropped so a lone file can replay.
+7. **Pick one** from that exact pool. Pure uniform by default; if the folder has the
+   Personal Algorithm on, or any pool file is a **favorite**, a single weighted draw
+   is used instead. Favorites get a flat weight bonus (priority) that applies even
+   when the Personal Algorithm is off; every eligible file always keeps a real chance.
 8. **Load** it into the *same* VLC window via the `in_play` HTTP command; reset
    the load timestamp. The window is never closed or recreated.
 

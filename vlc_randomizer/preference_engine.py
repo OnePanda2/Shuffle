@@ -33,6 +33,7 @@ from .config import (
     AFFINITY_WATCH_REWARD_TIERS,
     AFFINITY_WEIGHT_MULTIPLIER,
     BASE_WEIGHT,
+    FAVORITE_WEIGHT_BONUS,
     REDISCOVERY_GROWTH_EXPONENT,
     REDISCOVERY_SCALE,
     REDISCOVERY_WEIGHT_MULTIPLIER,
@@ -97,17 +98,22 @@ def compute_rediscovery_score(last_selected_at: Optional[float], now: float) -> 
 
 
 def compute_contributions(
-    affinity_score: float, rediscovery_score: float
+    affinity_score: float, rediscovery_score: float, is_favorite: bool = False
 ) -> list[tuple[str, float]]:
     """Return the named weight contributions from each signal.
 
     A list of (name, value) specifically so future signals (Like/Dislike, Play
     Count, Skip Streaks, ...) become one new appended entry later, without
     changing this function's signature or any caller.
+
+    The ``favorite`` contribution is what gives a favorited file its priority in
+    its own genre. It is independent of Affinity/Rediscovery, so it applies even
+    when the Personal Algorithm is off (those two are passed in as 0 then).
     """
     return [
         ("affinity", affinity_score * AFFINITY_WEIGHT_MULTIPLIER),
         ("rediscovery", rediscovery_score * REDISCOVERY_WEIGHT_MULTIPLIER),
+        ("favorite", FAVORITE_WEIGHT_BONUS if is_favorite else 0.0),
     ]
 
 
@@ -124,6 +130,8 @@ def select_weighted(
     pool: Sequence[str],
     preferences: dict[str, MediaPreference],
     now: float,
+    favorites: Optional[set[str]] = None,
+    personalize: bool = True,
     rng: Optional[random.Random] = None,
 ) -> Optional[str]:
     """Pick one file from *pool* by a single weighted random draw.
@@ -134,15 +142,29 @@ def select_weighted(
     probability — it never guarantees the pick, and no eligible file can reach a
     zero probability (BASE_WEIGHT floor). Returns None for an empty pool, matching
     selection_engine.select's contract.
+
+    ``favorites`` is the set of favorited paths; any pool file in it gets the flat
+    favorite bonus so it is more likely (never guaranteed) to be picked. When
+    ``personalize`` is False the Affinity/Rediscovery signals are ignored (treated
+    as 0) and ONLY the favorite bonus differentiates weights — this is the path
+    used to give favorites priority in a genre that has the Personal Algorithm off.
+    With no favorites present and ``personalize`` False, every weight equals
+    BASE_WEIGHT, i.e. a plain uniform draw.
     """
     if not pool:
         return None
     r = rng or _SYSTEM_RNG
+    favorites = favorites or set()
     weights: list[float] = []
     for path in pool:
-        pref = preferences.get(path)
-        affinity = pref.affinity_score if pref is not None else 0.0
-        last_selected = pref.last_selected_at if pref is not None else None
-        rediscovery = compute_rediscovery_score(last_selected, now)
-        weights.append(compute_weight(compute_contributions(affinity, rediscovery)))
+        if personalize:
+            pref = preferences.get(path)
+            affinity = pref.affinity_score if pref is not None else 0.0
+            last_selected = pref.last_selected_at if pref is not None else None
+            rediscovery = compute_rediscovery_score(last_selected, now)
+        else:
+            affinity = 0.0
+            rediscovery = 0.0
+        contribs = compute_contributions(affinity, rediscovery, path in favorites)
+        weights.append(compute_weight(contribs))
     return r.choices(list(pool), weights=weights, k=1)[0]

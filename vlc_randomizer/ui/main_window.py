@@ -130,7 +130,9 @@ class MainWindow(QMainWindow):
                 "VLC could not be located automatically. Open Settings and set "
                 "the path to vlc.exe before adding slots.",
             )
-        if not self._context.state.get_folders():
+        # The Favorites genre always exists, so onboard based on real (genre) folders.
+        real_folders = [f for f in self._context.state.get_folders() if not f.is_favorites]
+        if not real_folders:
             QMessageBox.information(
                 self, "Welcome",
                 "Let's set up your genre folders. Add one or more folders in the "
