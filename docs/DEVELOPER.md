@@ -56,16 +56,22 @@ cross-module orchestration lives in `slot_manager` and `app`.
   random eligible file so the window isn't black. This performs no evaluation and
   no state mutation — the first *Next* press is what evaluates it. (Spec left
   first-file behaviour unspecified; this is a pure UX addition.)
-- **Native-control detection (v1.1).** VLC's own Next/Previous button and
-  end-of-media also trigger a fresh random pick. VLC's HTTP interface is
-  poll-only (no event push), so `load()` builds a deliberate **two-item playlist**
-  (the file + a queued duplicate of it) and the 1 Hz poll watches VLC's
-  `currentplid`. Validated against real VLC: on a *single*-item playlist VLC's
-  Next merely *restarts* the current file (no observable change), but with a
-  trailing duplicate, Next and end-of-media both advance to a new `currentplid`
-  the poller detects — while seeking and pausing keep it unchanged (no false
-  triggers). This intentionally **reverses** the original spec's "do not detect
-  VLC's native Next/close clicks" rule at the user's explicit request.
+- **Native-control detection, instant advance (v1.1, reworked v1.4).** VLC's own
+  Next/Previous button and end-of-media also advance to a fresh pick. VLC's HTTP
+  interface is poll-only (no event push), so `load()` builds a deliberate
+  **two-item playlist** and the 1 Hz poll watches VLC's `currentplid`: on a
+  *single*-item playlist VLC's Next merely *restarts* the current file (no
+  observable change), but with a trailing item, Next and end-of-media advance to a
+  new `currentplid` the poller detects — while seeking and pausing keep it
+  unchanged (no false triggers). The trailing item is the app's **real next pick**
+  (not a duplicate of the current file), so VLC's own Next jumps straight to a new
+  movie with no visible replay. When the poll sees the advance it *adopts* that
+  already-playing pick — running the same watched/skipped bookkeeping as a Next
+  press, then queuing the following pick behind it — rather than reloading. A
+  duplicate is queued only as a fallback when nothing else is eligible (e.g. a
+  single-file folder), in which case the poll falls back to a full Next press.
+  This intentionally **reverses** the original spec's "do not detect VLC's native
+  Next/close clicks" rule at the user's explicit request.
 - **Persistence = SQLite** (WAL, foreign keys, process-wide lock). Atomic writes,
   no partial-write corruption across the two lists, cheap per-folder queries. A
   corrupt DB file is quarantined and recreated on open (history loss on corruption

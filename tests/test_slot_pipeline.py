@@ -26,6 +26,7 @@ class FakeVlc:
     def __init__(self, port):
         self.port = port
         self.loaded = []          # history of files loaded into this window
+        self.queued = []          # history of files enqueued behind the current one
         self.launched = False
         self.stopped = False
         self.plid = 0             # increments on each load (like VLC assigns)
@@ -34,10 +35,16 @@ class FakeVlc:
     def launch(self, *a, **k):
         self.launched = True
 
-    def load(self, file_path):
+    def load(self, file_path, queue_path=None):
         self.loaded.append(file_path)
+        if queue_path is not None:
+            self.queued.append(queue_path)
         self.plid += 1
         self.state = "playing"
+        return True
+
+    def enqueue(self, file_path):
+        self.queued.append(file_path)
         return True
 
     def get_status(self):
@@ -56,11 +63,16 @@ class FakeVlc:
 
     # -- helpers to simulate the user acting inside the VLC window ----------
     def simulate_native_next(self):
-        """User pressed VLC's own Next: playlist advances to the duplicate id."""
+        """User pressed VLC's own Next (or media ended): VLC advances to the next
+        playlist item, so currentplid changes and it keeps playing."""
         self.plid += 1
+        self.state = "playing"
 
-    def simulate_end(self):
-        """Media ended: VLC reports a stopped state."""
+    # Media ending advances to the queued item exactly like a native Next.
+    simulate_end = simulate_native_next
+
+    def simulate_stop(self):
+        """No next item to advance to: VLC halts (the duplicate-fallback case)."""
         self.state = "stopped"
 
 
@@ -269,50 +281,61 @@ def test_close_slot_stops_vlc_and_frees_port(env):
 
 # -- native-control detection (VLC's own Next / end-of-media) --------------
 
-def test_poll_detects_native_next_and_autoadvances(env):
+def test_native_next_jumps_instantly_to_queued_pick(env):
+    """VLC's own Next must adopt the already-playing queued pick (no reload)."""
     state, _, manager, clock, fakes, media_dir, _ = env
     folder = state.add_folder("Thriller", str(media_dir))
     slot = manager.create_slot(folder.id)
     fake = fakes[slot.port]
+
+    orig = slot.current_file
+    pending = slot.pending_file
+    assert pending is not None and pending != orig   # a real next pick was queued
     loads_before = len(fake.loaded)
 
-    # Within the grace window, even a playlist change must NOT auto-advance.
+    # Within the grace window, even a playlist change must NOT advance.
     fake.simulate_native_next()
     assert manager.poll_and_maybe_advance(slot.slot_id) is None
-    assert len(fake.loaded) == loads_before
+    assert slot.current_file == orig
 
-    # Past the grace window, the native Next is detected and overridden.
+    # Past the grace window: adopt the queued file — instant, with NO new load.
     clock.advance(2)
     result = manager.poll_and_maybe_advance(slot.slot_id)
     assert result is not None and result.status is NextStatus.OK
-    assert len(fake.loaded) == loads_before + 1   # a fresh file was loaded
+    assert slot.current_file == pending              # jumped straight to the queued pick
+    assert result.previous_file == orig
+    assert len(fake.loaded) == loads_before          # nothing was reloaded
+    assert slot.pending_file is not None             # next pick queued for the next Next
+    assert slot.pending_file != slot.current_file
 
 
-def test_poll_detects_end_of_media(env):
+def test_native_next_records_history_like_a_press(env):
+    """Adopting the queued pick still evaluates the file that just ended."""
     state, _, manager, clock, fakes, media_dir, _ = env
-    folder = state.add_folder("Thriller", str(media_dir))
+    folder = state.add_folder("Thriller", str(media_dir))  # thr=60, toggle off
     slot = manager.create_slot(folder.id)
-    fake = fakes[slot.port]
-    loads_before = len(fake.loaded)
+    orig = slot.current_file
 
-    clock.advance(2)
-    fake.simulate_end()                            # media finished -> stopped
+    clock.advance(120)                               # watched
+    fake = fakes[slot.port]
+    fake.simulate_native_next()
     result = manager.poll_and_maybe_advance(slot.slot_id)
-    assert result is not None and result.status is NextStatus.OK
-    assert len(fake.loaded) == loads_before + 1
+
+    assert result.classification is Classification.WATCHED
+    assert orig in state.get_excluded_paths(folder.id)   # cooldown recorded
 
 
 def test_poll_no_trigger_while_playing_unchanged(env):
-    """Seeking/pausing keep the playlist id — the poller must not auto-advance."""
+    """Seeking/pausing keep the playlist id — the poller must not advance."""
     state, _, manager, clock, fakes, media_dir, _ = env
     folder = state.add_folder("Thriller", str(media_dir))
     slot = manager.create_slot(folder.id)
     fake = fakes[slot.port]
-    loads_before = len(fake.loaded)
+    current_before = slot.current_file
 
     clock.advance(30)                              # plenty past grace, id unchanged
     assert manager.poll_and_maybe_advance(slot.slot_id) is None
-    assert len(fake.loaded) == loads_before
+    assert slot.current_file == current_before
 
 
 # -- Personal Algorithm integration ---------------------------------------

@@ -80,6 +80,7 @@ class Slot:
     current_file: Optional[str] = None
     load_monotonic: Optional[float] = None  # clock value when current_file loaded
     expected_plid: Optional[int] = None     # VLC playlist id of the file we loaded
+    pending_file: Optional[str] = None      # the real next pick queued after current_file
 
 
 # A factory that builds (but does not launch) a VlcInstance for a given port.
@@ -209,46 +210,11 @@ class SlotManager:
 
         # Re-read folder settings every press so live setting changes take effect.
         folder = self._state.get_folder(slot.folder_id)
-        previous = slot.current_file
-        elapsed: Optional[float] = None
-        classification = Classification.NONE
 
-        # STEP 1 — evaluate the previously-playing file by pause-inclusive
-        # wall-clock elapsed time since it was loaded.
-        if previous is not None and slot.load_monotonic is not None:
-            elapsed = self._clock() - slot.load_monotonic
-            if elapsed < folder.skip_threshold:
-                classification = Classification.SKIPPED
-            else:
-                classification = Classification.WATCHED
-
-        # +++ ADDED (Personal Algorithm) — AFFINITY TRACKING. Distinct from the
-        # locked 8 steps. Runs UNCONDITIONALLY on every Next press for every folder,
-        # regardless of folder.personal_algorithm (only the STEP-7 selection below
-        # is gated by the toggle). Piggybacks on the step-1 classification and the
-        # SAME `elapsed` value — no new timer, no new measurement.
-        if classification is Classification.WATCHED:
-            self._update_affinity(folder.id, previous,
-                                  preference_engine.compute_watch_reward(elapsed))
-        elif classification is Classification.SKIPPED:
-            self._update_affinity(folder.id, previous,
-                                  -preference_engine.compute_skip_penalty())
-        # Classification.NONE => nothing was playing, so there is no file to update.
-
-        # STEPS 4 & 5 — cooldown tick on this folder FIRST (see module docstring):
-        # decrement all pre-existing exclusions, release any that reach 0.
-        released = self._state.apply_cooldown_tick(folder.id)
-
-        # STEPS 2 & 3 — record the just-evaluated file into the appropriate lists
-        # with a full count of N (so it sits out exactly N future presses).
-        if classification is Classification.SKIPPED:
-            # Skipped files ALWAYS go to the review list...
-            self._state.add_to_review(folder.id, previous, reason="skipped")
-            # ...and only enter the cooldown if this folder opts in.
-            if folder.exclude_skipped:
-                self._state.add_exclusion(folder.id, previous, folder.shuffle_count)
-        elif classification is Classification.WATCHED:
-            self._state.add_exclusion(folder.id, previous, folder.shuffle_count)
+        # STEPS 1-5 — evaluate the previously-playing file and record its history
+        # (classification, affinity, cooldown tick, list writes). Shared with the
+        # native-advance path so both keep identical bookkeeping.
+        previous, elapsed, classification, released = self._evaluate_and_record(slot, folder)
 
         # STEP 6 — build the eligible pool: folder files, on disk, not excluded.
         files = self._folder_files(folder)
@@ -291,8 +257,10 @@ class SlotManager:
         # here, so it correctly does not reset Rediscovery.
         self._state.mark_selected(folder.id, choice, time.time())
 
-        # STEP 8 — load the pick into the SAME window (never recreate it).
-        if not self._apply_load(slot, choice):
+        # STEP 8 — load the pick into the SAME window (never recreate it). This also
+        # queues the *next* real pick behind it so VLC's own Next jumps straight to a
+        # new movie (see _apply_load / poll_and_maybe_advance).
+        if not self._apply_load(slot, choice, folder):
             return NextResult(
                 NextStatus.LOAD_FAILED, previous_file=previous,
                 classification=classification, released_files=released,
@@ -309,6 +277,49 @@ class SlotManager:
         )
 
     # -- internals ---------------------------------------------------------
+
+    def _evaluate_and_record(self, slot: Slot, folder):
+        """Steps 1-5: judge the currently-loaded file and write its history.
+
+        Shared by the app's Next button (press_next) and the native-advance path
+        (poll_and_maybe_advance) so both record watched/skipped, affinity, the
+        cooldown tick, and the review/exclusion lists identically. Returns
+        (previous_file, elapsed, classification, released_files).
+        """
+        previous = slot.current_file
+        elapsed: Optional[float] = None
+        classification = Classification.NONE
+
+        # STEP 1 — evaluate by pause-inclusive wall-clock elapsed time since load.
+        if previous is not None and slot.load_monotonic is not None:
+            elapsed = self._clock() - slot.load_monotonic
+            if elapsed < folder.skip_threshold:
+                classification = Classification.SKIPPED
+            else:
+                classification = Classification.WATCHED
+
+        # Affinity tracking (Personal Algorithm) — unconditional, piggybacks on the
+        # same classification/elapsed. NONE => nothing was playing, nothing to update.
+        if classification is Classification.WATCHED:
+            self._update_affinity(folder.id, previous,
+                                  preference_engine.compute_watch_reward(elapsed))
+        elif classification is Classification.SKIPPED:
+            self._update_affinity(folder.id, previous,
+                                  -preference_engine.compute_skip_penalty())
+
+        # STEPS 4 & 5 — cooldown tick FIRST (see module docstring): decrement all
+        # pre-existing exclusions, release any that reach 0.
+        released = self._state.apply_cooldown_tick(folder.id)
+
+        # STEPS 2 & 3 — record the just-evaluated file with a full count of N.
+        if classification is Classification.SKIPPED:
+            self._state.add_to_review(folder.id, previous, reason="skipped")
+            if folder.exclude_skipped:
+                self._state.add_exclusion(folder.id, previous, folder.shuffle_count)
+        elif classification is Classification.WATCHED:
+            self._state.add_exclusion(folder.id, previous, folder.shuffle_count)
+
+        return previous, elapsed, classification, released
 
     def _update_affinity(self, folder_id: int, file_path: str, delta: float) -> None:
         """Apply an Affinity delta to a file and persist it (zero-floored).
@@ -366,32 +377,54 @@ class SlotManager:
             slot.current_file = None
             slot.load_monotonic = None
             slot.expected_plid = None
+            slot.pending_file = None
             logger.info("Slot %d: no eligible file to load initially", slot.slot_id)
             return None
-        self._apply_load(slot, choice)
+        self._apply_load(slot, choice, folder)
         return choice
 
-    def _apply_load(self, slot: Slot, choice: str) -> bool:
-        """Load *choice* into the slot's window and record load time + playlist id.
+    def _pick_preload(self, folder, current: str) -> Optional[str]:
+        """Choose the real next pick to queue behind *current* (never *current*).
 
-        The playlist id (captured from VLC right after loading) is the baseline
-        the poller compares against to detect a native Next / end-of-media.
+        Returns None if nothing else is eligible (e.g. a single-file folder); the
+        caller then falls back to queuing a duplicate so a native Next is still
+        detectable. No history is written and the pick is NOT marked selected —
+        that only happens if/when it actually starts playing.
         """
-        if not slot.vlc.load(choice):
+        files = self._folder_files(folder)
+        excluded = self._state.get_excluded_paths(folder.id) | {current}
+        return self._select_for_folder(folder, files, excluded)
+
+    def _apply_load(self, slot: Slot, choice: str, folder) -> bool:
+        """Load *choice* into the slot's window and queue the real next pick behind it.
+
+        Queuing the actual next pick (instead of a duplicate of *choice*) is what
+        makes VLC's own Next button jump straight to a fresh movie: when VLC
+        advances to that queued item the poller adopts it — no reload, no flash.
+        Records the load time and the playlist id baseline for advance detection.
+        """
+        preload = self._pick_preload(folder, choice)
+        if not slot.vlc.load(choice, preload):
             return False
         slot.current_file = choice
         slot.load_monotonic = self._clock()
+        slot.pending_file = preload
         status = slot.vlc.get_status()
         slot.expected_plid = status.plid if status is not None else None
         return True
 
     def poll_and_maybe_advance(self, slot_id: int) -> Optional[NextResult]:
-        """Detect a native VLC Next / end-of-media and auto-advance to a new pick.
+        """Detect a native VLC Next / end-of-media and advance to the queued pick.
 
-        Called on the UI poll timer. Returns a NextResult if it auto-advanced,
-        else None. The signal is a change in VLC's current playlist id away from
-        the file we loaded (or a stopped state) — validated against real VLC to be
-        unambiguous versus seeking or pausing, which keep the id unchanged.
+        Called on the UI poll timer. Returns a NextResult if it advanced, else None.
+        The signal is a change in VLC's current playlist id away from the file we
+        loaded (or a stopped state) — unambiguous versus seeking or pausing, which
+        keep the id unchanged.
+
+        When a real next pick was queued (the normal case), VLC has already jumped
+        straight to it, so we *adopt* that already-playing file rather than loading
+        a new one. Only when nothing was queued (a duplicate was used) or VLC has
+        stopped do we fall back to a full Next press.
         """
         slot = self._slots.get(slot_id)
         if (slot is None or slot.folder_id is None
@@ -420,8 +453,46 @@ class SlotManager:
         if not (stopped or moved):
             return None
 
+        if moved and slot.pending_file is not None:
+            logger.info("Slot %d: native advance -> adopt queued pick", slot_id)
+            return self._adopt_pending(slot, status.plid)
+
+        # No queued pick (duplicate fallback) or VLC stopped: do a full Next.
         logger.info("Slot %d: detected native advance/end -> auto Next", slot_id)
         return self.press_next(slot_id)
+
+    def _adopt_pending(self, slot: Slot, new_plid: Optional[int]) -> NextResult:
+        """Accept the queued pick VLC already advanced to as the current file.
+
+        Records the file that just ended (same bookkeeping as a Next press), makes
+        the queued pick current, resets its Rediscovery clock, and queues the next
+        real pick behind it so the following native Next is instant too.
+        """
+        folder = self._state.get_folder(slot.folder_id)  # type: ignore[arg-type]
+        previous, elapsed, classification, released = self._evaluate_and_record(slot, folder)
+
+        adopted = slot.pending_file
+        slot.current_file = adopted
+        slot.load_monotonic = self._clock()
+        slot.expected_plid = new_plid
+        # Being played resets the file's neglect clock (folder-scoped).
+        if adopted is not None:
+            self._state.mark_selected(folder.id, adopted, time.time())
+
+        # Queue the next real pick so VLC's Next stays instant. Nothing to load into
+        # the window — the adopted file is already playing.
+        preload = self._pick_preload(folder, adopted) if adopted is not None else None
+        slot.pending_file = preload
+        if preload is not None:
+            slot.vlc.enqueue(preload)
+
+        logger.info("Slot %d native-next: %s -> %s (%s)", slot.slot_id,
+                    previous, adopted, classification.value)
+        return NextResult(
+            NextStatus.OK, selected_file=adopted, previous_file=previous,
+            classification=classification, released_files=released,
+            elapsed_seconds=elapsed,
+        )
 
     def _require_slot(self, slot_id: int) -> Slot:
         slot = self._slots.get(slot_id)

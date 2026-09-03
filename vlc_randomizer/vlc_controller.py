@@ -145,19 +145,23 @@ class VlcInstance:
 
     # -- commands ----------------------------------------------------------
 
-    def load(self, file_path: str) -> bool:
+    def load(self, file_path: str, queue_path: Optional[str] = None) -> bool:
         """Load *file_path* into this already-open window and start playing it.
 
         The same window is always reused — never closed or recreated. We build a
-        deliberate **two-item playlist**: the file, plus a queued duplicate of
-        it. This is what makes VLC's own Next button (and end-of-media) detectable
-        by the app: with a single item, VLC's Next merely restarts the current
-        file (no observable change), whereas with a trailing duplicate it advances
-        to a new playlist id the poller can see. The duplicate is the same file,
-        so the brief moment before the app overrides it shows identical content.
+        deliberate **two-item playlist**: the file, plus a trailing second item.
+        The trailing item is what makes VLC's own Next button (and end-of-media)
+        both *detectable* and *instant*: with a single item VLC's Next merely
+        restarts the current file (no observable change), whereas with a trailing
+        item it advances to a new playlist id the poller can see.
 
-        Steps: clear the playlist, play the file, enqueue the duplicate. Returns
-        True if the play command was accepted.
+        When *queue_path* is given it is that trailing item — the app's real next
+        pick — so VLC's Next jumps straight to a fresh movie. When it is None
+        (nothing else eligible, e.g. a single-file folder) the current file is
+        duplicated instead, so a native Next is still detectable.
+
+        Steps: clear the playlist, play the file, enqueue the trailing item.
+        Returns True if the play command was accepted.
         """
         try:
             mrl = Path(file_path).as_uri()
@@ -171,9 +175,28 @@ class VlcInstance:
             logger.warning("Load command failed on port %d for %s",
                            self._port, file_path)
             return False
-        # Trailing duplicate: gives VLC's Next / end-of-media somewhere to go.
-        self._request({"command": "in_enqueue", "input": mrl})
+        # Trailing item: the real next pick if we have one, else a duplicate.
+        queue_mrl = mrl
+        if queue_path is not None:
+            try:
+                queue_mrl = Path(queue_path).as_uri()
+            except ValueError:
+                queue_mrl = mrl
+        self._request({"command": "in_enqueue", "input": queue_mrl})
         return True
+
+    def enqueue(self, file_path: str) -> bool:
+        """Append *file_path* to the playlist without disturbing playback.
+
+        Used to queue the next pick behind the one VLC just advanced to, so the
+        following native Next is instant too. Returns True if VLC accepted it.
+        """
+        try:
+            mrl = Path(file_path).as_uri()
+        except ValueError as exc:
+            logger.error("Cannot build MRL for %s: %s", file_path, exc)
+            return False
+        return self._request({"command": "in_enqueue", "input": mrl}) is not None
 
     def get_status(self) -> Optional[PlaybackStatus]:
         """Return the current playback status, or None if unreachable."""
