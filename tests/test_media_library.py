@@ -61,3 +61,9 @@ def test_file_exists(tmp_path):
     f.write_bytes(b"x")
     assert file_exists(str(f))
     assert not file_exists(str(tmp_path / "gone.mp4"))
+
+
+def test_file_exists_treats_urls_as_present():
+    # Cloud URLs can't be cheaply verified, so they are trusted as present.
+    assert file_exists("https://archive.org/download/item/movie.mp4")
+    assert file_exists("http://example.com/a.mkv")

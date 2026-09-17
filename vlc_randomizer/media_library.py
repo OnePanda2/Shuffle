@@ -125,7 +125,13 @@ def file_exists(path: str) -> bool:
 
     Wrapped so a transient OS error (e.g. a disconnected network drive) is
     treated as 'not present' rather than crashing selection.
+
+    A cloud (http/https) URL cannot be verified without a network round-trip, so
+    we trust the manifest and treat any URL as present. A dead URL simply fails to
+    load, which the Next pipeline already handles gracefully.
     """
+    if path.startswith(("http://", "https://")):
+        return True
     try:
         return os.path.isfile(path)
     except OSError:

@@ -85,6 +85,20 @@ BASE_WEIGHT = 1.0  # placeholder
 # never drop to a zero chance. Larger => favorites dominate more.
 FAVORITE_WEIGHT_BONUS = 2.0  # placeholder
 
+# --- Cloud media source (Internet Archive) -------------------------------
+# A "cloud genre" streams from an Internet Archive item instead of a disk folder,
+# so a large library can live online (free) rather than on local disk. The item's
+# file list comes from the free metadata API; each file streams from the download
+# endpoint, which supports HTTP range requests (what VLC needs to seek/stream).
+# Upload your own / public-domain files with metadata `noindex:true` to keep the
+# item out of archive.org search — reachable only by its direct URL.
+SOURCE_LOCAL = "local"
+SOURCE_CLOUD = "cloud"
+
+IA_METADATA_URL = "https://archive.org/metadata/{identifier}"
+IA_DOWNLOAD_URL = "https://archive.org/download/{identifier}/{filename}"
+CLOUD_REQUEST_TIMEOUT = 15  # seconds for an Internet Archive metadata fetch
+
 # --- Native-control detection --------------------------------------------
 # When the user presses VLC's own Next/Previous button or a file ends, the app
 # detects it (by a change in VLC's current playlist id) and auto-advances to a

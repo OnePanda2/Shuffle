@@ -10,7 +10,8 @@ from __future__ import annotations
 import logging
 import sys
 
-from .config import AppPaths, detect_vlc_path
+from .cloud_library import CloudLibrary
+from .config import AppPaths, SOURCE_CLOUD, detect_vlc_path
 from .file_ops import move_to_recycle_bin
 from .logging_setup import configure_logging
 from .media_library import MediaLibrary
@@ -35,6 +36,7 @@ class AppContext:
         self.paths = paths
         self.state = StateStore(paths.db_path)
         self.library = MediaLibrary()
+        self.cloud = CloudLibrary()  # Internet Archive manifests for cloud genres
 
         # The Favorites genre is a permanent virtual folder; create it once so it
         # is always available to assign to a slot.
@@ -53,7 +55,8 @@ class AppContext:
             vlc_path = self.state.get_setting(SETTING_VLC_PATH) or ""
             return VlcInstance(vlc_path, port)
 
-        self.slots = SlotManager(self.state, self.library, vlc_factory)
+        self.slots = SlotManager(self.state, self.library, vlc_factory,
+                                 cloud_library=self.cloud)
 
     # -- cross-cutting helpers used by the UI ------------------------------
 
@@ -79,13 +82,33 @@ class AppContext:
     def is_favorite(self, file_path: str) -> bool:
         return self.state.is_favorite(file_path)
 
+    def invalidate_source(self, folder) -> None:
+        """Drop the cached listing for a folder, from the right source cache."""
+        if folder.source_type == SOURCE_CLOUD:
+            self.cloud.invalidate(folder.path)
+        else:
+            self.library.invalidate(folder.path)
+
     def rescan_folder(self, folder_id: int) -> int:
-        """Rescan a folder's files, returning the new file count."""
+        """Rescan a folder's files, returning the new file count.
+
+        For a cloud genre this re-fetches the Internet Archive manifest; for a
+        local genre it re-walks the disk.
+        """
         folder = self.state.get_folder(folder_id)
+        if folder.source_type == SOURCE_CLOUD:
+            return len(self.cloud.rescan(folder.path))
         return len(self.library.rescan(folder.path))
 
     def delete_permanently(self, folder_id: int, file_path: str) -> bool:
-        """Recycle the file on disk and drop it from the review list on success."""
+        """Recycle the file on disk and drop it from the review list on success.
+
+        A cloud (streamed) file has no local copy to recycle — the app can't delete
+        it from Internet Archive — so this just removes it from the review list.
+        """
+        if file_path.startswith(("http://", "https://")):
+            self.state.remove_from_review(folder_id, file_path)
+            return True
         ok = move_to_recycle_bin(file_path)
         if ok:
             self.state.remove_from_review(folder_id, file_path)

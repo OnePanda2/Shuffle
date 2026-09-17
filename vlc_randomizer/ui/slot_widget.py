@@ -10,6 +10,7 @@ as watched or as a skip.
 from __future__ import annotations
 
 import os
+import urllib.parse
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
@@ -195,12 +196,14 @@ class SlotWidget(QWidget):
                 skip_threshold=v["skip_threshold"],
                 exclude_skipped=v["exclude_skipped"],
                 personal_algorithm=v["personal_algorithm"],
+                source_type=v["source_type"],
             )
         except ValueError as exc:
             QMessageBox.warning(self, "Cannot update folder", str(exc))
             return
-        if v["path"] != folder.path:
-            self._context.library.invalidate(folder.path)
+        if v["path"] != folder.path or v["source_type"] != folder.source_type:
+            self._context.invalidate_source(folder)
+            self._context.invalidate_source(self._context.state.get_folder(folder.id))
         self.refresh_folders()
 
     def _on_review(self) -> None:
@@ -222,9 +225,17 @@ class SlotWidget(QWidget):
 
     # -- display refresh ---------------------------------------------------
 
+    @staticmethod
+    def _display_name(path: str) -> str:
+        """Friendly file name for a local path or a cloud URL."""
+        if path.startswith(("http://", "https://")):
+            name = urllib.parse.unquote(path.rsplit("/", 1)[-1])
+            return name or path
+        return os.path.basename(path)
+
     def _update_current_file(self) -> None:
         current = self._slot.current_file
-        self._file_label.setText(os.path.basename(current) if current else "—")
+        self._file_label.setText(self._display_name(current) if current else "—")
         self._update_favorite_button()
 
     # -- favorites ---------------------------------------------------------

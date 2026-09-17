@@ -11,6 +11,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from vlc_randomizer.cloud_library import CloudLibrary
 from vlc_randomizer.media_library import MediaLibrary
 from vlc_randomizer.slot_manager import Classification, NextStatus, SlotManager
 from vlc_randomizer.state_store import StateStore
@@ -525,3 +526,55 @@ def test_favorite_in_normal_genre_gets_picked(env):
     # genre still surfaces other files too (no starvation).
     assert files[0] in seen
     assert len(seen) > 1
+
+
+# -- cloud genres (Internet Archive) --------------------------------------
+
+def _cloud_env(tmp_path, item_files):
+    """A SlotManager wired to a fake cloud library (no network)."""
+    state = StateStore(tmp_path / "cloud.db")
+    library = MediaLibrary()
+    clock = Clock()
+    fakes = {}
+
+    def factory(port):
+        fakes[port] = FakeVlc(port)
+        return fakes[port]
+
+    meta = {ident: {"files": [{"name": n} for n in names]}
+            for ident, names in item_files.items()}
+    cloud = CloudLibrary(fetcher=lambda ident: meta.get(ident))
+    manager = SlotManager(state, library, factory, cloud_library=cloud, clock=clock)
+    return state, manager, clock
+
+
+def test_cloud_folder_streams_archive_urls(tmp_path):
+    state, manager, clock = _cloud_env(
+        tmp_path, {"my_item": [f"movie_{i}.mp4" for i in range(4)]})
+    folder = state.add_folder("Cloud", "my_item", source_type="cloud")
+    slot = manager.create_slot(folder.id)
+
+    prefix = "https://archive.org/download/my_item/"
+    assert slot.current_file.startswith(prefix)   # initial load streams a URL
+    for _ in range(10):
+        clock.advance(2)
+        result = manager.press_next(slot.slot_id)
+        assert result.status is NextStatus.OK
+        assert result.selected_file.startswith(prefix)
+        assert result.selected_file != result.previous_file  # no-repeat holds for URLs
+    state.close()
+
+
+def test_favoriting_a_streamed_movie_and_playing_favorites(tmp_path):
+    state, manager, clock = _cloud_env(tmp_path, {"my_item": ["a.mp4", "b.mp4"]})
+    cloud_folder = state.add_folder("Cloud", "my_item", source_type="cloud")
+    slot = manager.create_slot(cloud_folder.id)
+    url = slot.current_file
+    assert url.startswith("https://archive.org/download/my_item/")
+
+    # Favorite the streamed movie, then play the Favorites genre.
+    state.add_favorite(url, cloud_folder.id)
+    fav_folder = state.ensure_favorites_folder()
+    fav_slot = manager.create_slot(fav_folder.id)
+    assert fav_slot.current_file == url            # Favorites plays the cloud URL
+    state.close()

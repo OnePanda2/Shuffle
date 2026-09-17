@@ -29,6 +29,17 @@ from .config import HTTP_HOST, HTTP_PASSWORD, IMAGE_DURATION_SECONDS
 logger = logging.getLogger(__name__)
 
 
+def to_mrl(path: str) -> str:
+    """Return a VLC-playable MRL for a local path or a cloud URL.
+
+    An http(s) URL is already an MRL and is passed through unchanged (VLC streams
+    it, following redirects). A local path is converted to a ``file://`` URI.
+    """
+    if path.startswith(("http://", "https://")):
+        return path
+    return Path(path).as_uri()
+
+
 class VlcError(Exception):
     """Base class for VLC control failures."""
 
@@ -164,7 +175,7 @@ class VlcInstance:
         Returns True if the play command was accepted.
         """
         try:
-            mrl = Path(file_path).as_uri()
+            mrl = to_mrl(file_path)
         except ValueError as exc:
             logger.error("Cannot build MRL for %s: %s", file_path, exc)
             return False
@@ -179,7 +190,7 @@ class VlcInstance:
         queue_mrl = mrl
         if queue_path is not None:
             try:
-                queue_mrl = Path(queue_path).as_uri()
+                queue_mrl = to_mrl(queue_path)
             except ValueError:
                 queue_mrl = mrl
         self._request({"command": "in_enqueue", "input": queue_mrl})
@@ -192,7 +203,7 @@ class VlcInstance:
         following native Next is instant too. Returns True if VLC accepted it.
         """
         try:
-            mrl = Path(file_path).as_uri()
+            mrl = to_mrl(file_path)
         except ValueError as exc:
             logger.error("Cannot build MRL for %s: %s", file_path, exc)
             return False

@@ -33,7 +33,8 @@ from enum import Enum
 from typing import Callable, Optional
 
 from . import preference_engine
-from .config import AUTO_ADVANCE_GRACE_SECONDS, HTTP_PORT_BASE, MAX_SLOTS
+from .cloud_library import CloudLibrary
+from .config import AUTO_ADVANCE_GRACE_SECONDS, HTTP_PORT_BASE, MAX_SLOTS, SOURCE_CLOUD
 from .media_library import MediaLibrary
 from .selection_engine import build_eligible_pool, pick_uniform
 from .state_store import StateStore
@@ -99,12 +100,14 @@ class SlotManager:
         state: StateStore,
         library: MediaLibrary,
         vlc_factory: VlcFactory,
+        cloud_library: Optional[CloudLibrary] = None,
         max_slots: int = MAX_SLOTS,
         port_base: int = HTTP_PORT_BASE,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._state = state
         self._library = library
+        self._cloud = cloud_library or CloudLibrary()
         self._vlc_factory = vlc_factory
         self._max_slots = max_slots
         self._port_base = port_base
@@ -335,12 +338,15 @@ class SlotManager:
     def _folder_files(self, folder) -> list[str]:
         """Return the media files a folder plays from.
 
-        A normal genre reads the cached recursive disk scan. The virtual Favorites
-        genre has no folder on disk — its "files" are the favorited paths from the
-        favorites table (existence-filtered downstream by the selection engine).
+        A local genre reads the cached recursive disk scan. A cloud genre reads the
+        cached Internet Archive manifest (streamable URLs). The virtual Favorites
+        genre has no source of its own — its "files" are the favorited paths from
+        the favorites table (which may be local paths or cloud URLs).
         """
         if folder.is_favorites:
             return list(self._state.get_favorite_paths())
+        if folder.source_type == SOURCE_CLOUD:
+            return self._cloud.get_files(folder.path)
         return self._library.get_files(folder.path)
 
     def _select_for_folder(self, folder, files, excluded) -> Optional[str]:

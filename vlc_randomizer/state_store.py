@@ -59,7 +59,8 @@ CREATE TABLE IF NOT EXISTS folders (
     exclude_skipped    INTEGER NOT NULL,           -- 0/1 boolean
     created_at         REAL    NOT NULL,
     personal_algorithm INTEGER NOT NULL DEFAULT 0, -- 0/1 boolean; weighted selection on
-    is_favorites       INTEGER NOT NULL DEFAULT 0  -- 0/1; the one virtual Favorites genre
+    is_favorites       INTEGER NOT NULL DEFAULT 0,  -- 0/1; the one virtual Favorites genre
+    source_type        TEXT    NOT NULL DEFAULT 'local'  -- 'local' disk | 'cloud' (IA item)
 );
 
 CREATE TABLE IF NOT EXISTS exclusion_list (
@@ -132,6 +133,7 @@ class Folder:
     created_at: float
     personal_algorithm: bool = False  # weighted (vs pure uniform) selection
     is_favorites: bool = False        # True only for the virtual Favorites genre
+    source_type: str = "local"        # 'local' disk path | 'cloud' (IA identifier[s])
 
 
 @dataclass
@@ -198,6 +200,7 @@ class StateStore:
             self._conn.executescript(_SCHEMA)
             self._migrate_folders_personal_algorithm()
             self._migrate_folders_is_favorites()
+            self._migrate_folders_source_type()
             self._conn.execute(
                 "INSERT OR IGNORE INTO schema_meta(key, value) VALUES('version', ?)",
                 (str(SCHEMA_VERSION),),
@@ -241,6 +244,22 @@ class StateStore:
             if "duplicate column" not in str(exc).lower():
                 raise
 
+    def _migrate_folders_source_type(self) -> None:
+        """Additively add the source_type column to an existing folders table.
+
+        Same additive-ALTER pattern as the other folder migrations; existing rows
+        default to 'local' so pre-cloud databases keep behaving as before.
+        """
+        try:
+            self._conn.execute(
+                "ALTER TABLE folders ADD COLUMN "
+                "source_type TEXT NOT NULL DEFAULT 'local'"
+            )
+            self._conn.commit()
+        except sqlite3.OperationalError as exc:
+            if "duplicate column" not in str(exc).lower():
+                raise
+
     def close(self) -> None:
         with self._lock:
             try:
@@ -258,17 +277,24 @@ class StateStore:
         skip_threshold: int = DEFAULT_SKIP_THRESHOLD,
         exclude_skipped: bool = DEFAULT_EXCLUDE_SKIPPED,
         personal_algorithm: bool = DEFAULT_PERSONAL_ALGORITHM,
+        source_type: str = "local",
     ) -> Folder:
-        """Register a new folder. Raises ValueError if the path already exists."""
+        """Register a new folder. Raises ValueError if the path already exists.
+
+        For a *cloud* folder, ``path`` holds the Internet Archive identifier(s)
+        rather than a disk path; it is still UNIQUE, so the same item can't be
+        registered twice.
+        """
         with self._lock:
             try:
                 cur = self._conn.execute(
                     """INSERT INTO folders
                        (name, path, shuffle_count, skip_threshold,
-                        exclude_skipped, created_at, personal_algorithm)
-                       VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                        exclude_skipped, created_at, personal_algorithm, source_type)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
                     (name, path, shuffle_count, skip_threshold,
-                     int(exclude_skipped), time.time(), int(personal_algorithm)),
+                     int(exclude_skipped), time.time(), int(personal_algorithm),
+                     source_type),
                 )
                 self._conn.commit()
             except sqlite3.IntegrityError as exc:
@@ -285,6 +311,7 @@ class StateStore:
         skip_threshold: Optional[int] = None,
         exclude_skipped: Optional[bool] = None,
         personal_algorithm: Optional[bool] = None,
+        source_type: Optional[str] = None,
     ) -> Folder:
         """Patch any subset of a folder's fields."""
         fields: list[str] = []
@@ -301,6 +328,8 @@ class StateStore:
             fields.append("exclude_skipped = ?"); values.append(int(exclude_skipped))
         if personal_algorithm is not None:
             fields.append("personal_algorithm = ?"); values.append(int(personal_algorithm))
+        if source_type is not None:
+            fields.append("source_type = ?"); values.append(source_type)
         if not fields:
             return self.get_folder(folder_id)
         values.append(folder_id)
@@ -345,6 +374,7 @@ class StateStore:
             created_at=row["created_at"],
             personal_algorithm=bool(row["personal_algorithm"]),
             is_favorites=bool(row["is_favorites"]),
+            source_type=row["source_type"],
         )
 
     # -- favorites folder (the one virtual genre) -------------------------

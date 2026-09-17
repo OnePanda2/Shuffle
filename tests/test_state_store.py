@@ -296,3 +296,60 @@ def test_favorites_persist_across_reopen(tmp_path):
     assert s2.get_favorite_paths() == {"a.mp4"}
     assert s2.ensure_favorites_folder().id == fav_folder.id  # still the same one
     s2.close()
+
+
+# -- source_type (local vs cloud) -----------------------------------------
+
+def test_folder_defaults_to_local_source(store):
+    f = store.add_folder("Local", r"C:\media\L")
+    assert f.source_type == "local"
+
+
+def test_cloud_folder_stores_identifier_as_path(store):
+    f = store.add_folder("Cloud", "my_movies_action", source_type="cloud")
+    assert f.source_type == "cloud"
+    assert f.path == "my_movies_action"          # path holds the IA identifier(s)
+    assert store.get_folder(f.id).source_type == "cloud"
+
+
+def test_update_folder_switches_source_type(store):
+    f = store.add_folder("F", r"C:\media\F")
+    updated = store.update_folder(f.id, source_type="cloud", path="an_item")
+    assert updated.source_type == "cloud"
+    assert updated.path == "an_item"
+
+
+def test_source_type_persists_across_reopen(tmp_path):
+    db = tmp_path / "src.db"
+    s1 = StateStore(db)
+    f = s1.add_folder("Cloud", "item_a, item_b", source_type="cloud")
+    s1.close()
+    s2 = StateStore(db)
+    got = s2.get_folder(f.id)
+    assert got.source_type == "cloud" and got.path == "item_a, item_b"
+    s2.close()
+
+
+def test_migration_adds_source_type_to_existing_db(tmp_path):
+    """A pre-cloud folders table (no source_type) gets the column, defaulting local."""
+    db = tmp_path / "old.db"
+    conn = sqlite3.connect(db)
+    conn.execute(
+        """CREATE TABLE folders (
+               id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL,
+               path TEXT NOT NULL UNIQUE, shuffle_count INTEGER NOT NULL,
+               skip_threshold INTEGER NOT NULL, exclude_skipped INTEGER NOT NULL,
+               created_at REAL NOT NULL)"""
+    )
+    conn.execute(
+        "INSERT INTO folders (name, path, shuffle_count, skip_threshold, "
+        "exclude_skipped, created_at) VALUES ('Old', 'C:/old', 10, 60, 0, 1.0)"
+    )
+    conn.commit()
+    conn.close()
+
+    store = StateStore(db)                       # runs the ALTER migrations
+    folders = [f for f in store.get_folders() if f.name == "Old"]
+    assert len(folders) == 1
+    assert folders[0].source_type == "local"     # new column, default local
+    store.close()

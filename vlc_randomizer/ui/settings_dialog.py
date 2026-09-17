@@ -10,14 +10,14 @@ from __future__ import annotations
 from typing import Optional
 
 from PySide6.QtWidgets import (
-    QCheckBox, QDialog, QDialogButtonBox, QFileDialog, QFormLayout,
+    QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFormLayout,
     QGroupBox, QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem,
     QMessageBox, QPushButton, QSpinBox, QVBoxLayout, QWidget,
 )
 
 from ..config import (
     DEFAULT_EXCLUDE_SKIPPED, DEFAULT_PERSONAL_ALGORITHM,
-    DEFAULT_SHUFFLE_COUNT, DEFAULT_SKIP_THRESHOLD,
+    DEFAULT_SHUFFLE_COUNT, DEFAULT_SKIP_THRESHOLD, SOURCE_CLOUD, SOURCE_LOCAL,
 )
 from ..state_store import Folder
 
@@ -34,16 +34,34 @@ class FolderEditDialog(QDialog):
         self.setMinimumWidth(460)
 
         self._name = QLineEdit(folder.name if folder else "")
+
+        # Source: a local disk folder, or an Internet Archive item streamed online.
+        self._source = QComboBox()
+        self._source.addItem("Local folder", SOURCE_LOCAL)
+        self._source.addItem("Internet Archive (stream online)", SOURCE_CLOUD)
+        current_source = folder.source_type if folder else SOURCE_LOCAL
+        idx = self._source.findData(current_source)
+        self._source.setCurrentIndex(idx if idx >= 0 else 0)
+        self._source.currentIndexChanged.connect(self._on_source_changed)
+
         # The Favorites genre has no folder on disk; keep its sentinel path but
         # never expose it for editing.
         self._path = QLineEdit(folder.path if folder else "")
-        browse = QPushButton("Browse…")
-        browse.clicked.connect(self._browse)
+        self._browse_btn = QPushButton("Browse…")
+        self._browse_btn.clicked.connect(self._browse)
         path_row = QHBoxLayout()
         path_row.addWidget(self._path)
-        path_row.addWidget(browse)
+        path_row.addWidget(self._browse_btn)
         path_widget = QWidget()
         path_widget.setLayout(path_row)
+        self._loc_label = QLabel("Folder:")
+        self._hint = QLabel(
+            "One or more archive.org item IDs, comma-separated. Upload your files "
+            "with metadata noindex:true so the item stays unlisted (reachable only "
+            "by its direct link)."
+        )
+        self._hint.setWordWrap(True)
+        self._hint.setVisible(False)
 
         self._shuffle = QSpinBox()
         self._shuffle.setRange(1, 100000)
@@ -80,12 +98,14 @@ class FolderEditDialog(QDialog):
         form = QFormLayout()
         form.addRow("Name:", self._name)
         if self._is_favorites:
-            # Virtual genre: no on-disk path to edit, just a note in its place.
+            # Virtual genre: no source to edit, just a note in its place.
             note = QLabel("Virtual genre — plays only your favorited movies.")
             note.setWordWrap(True)
             form.addRow("Folder:", note)
         else:
-            form.addRow("Folder:", path_widget)
+            form.addRow("Type:", self._source)
+            form.addRow(self._loc_label, path_widget)
+            form.addRow("", self._hint)
         form.addRow("Shuffle count (N):", self._shuffle)
         form.addRow("Skip threshold:", self._threshold)
         form.addRow("", self._exclude_skipped)
@@ -98,6 +118,19 @@ class FolderEditDialog(QDialog):
         layout = QVBoxLayout(self)
         layout.addLayout(form)
         layout.addWidget(buttons)
+
+        if not self._is_favorites:
+            self._on_source_changed()  # sync labels/visibility to the initial source
+
+    def _on_source_changed(self, _index: int = 0) -> None:
+        """Toggle the path row between a disk folder and an archive.org item ID."""
+        is_cloud = self._source.currentData() == SOURCE_CLOUD
+        self._loc_label.setText("Item ID(s):" if is_cloud else "Folder:")
+        self._browse_btn.setVisible(not is_cloud)
+        self._hint.setVisible(is_cloud)
+        self._path.setPlaceholderText(
+            "e.g. my_movies_bollywood, my_movies_action" if is_cloud else ""
+        )
 
     def _browse(self) -> None:
         start = self._path.text() or ""
@@ -113,9 +146,19 @@ class FolderEditDialog(QDialog):
             QMessageBox.warning(self, "Missing name", "Please enter a folder name.")
             return
         if not self._path.text().strip():
-            QMessageBox.warning(self, "Missing folder", "Please choose a folder path.")
+            if self._source_type() == SOURCE_CLOUD:
+                QMessageBox.warning(self, "Missing item ID",
+                                    "Enter at least one archive.org item ID.")
+            else:
+                QMessageBox.warning(self, "Missing folder",
+                                    "Please choose a folder path.")
             return
         self.accept()
+
+    def _source_type(self) -> str:
+        if self._is_favorites:
+            return self._folder.source_type if self._folder else SOURCE_LOCAL
+        return self._source.currentData()
 
     # -- results -----------------------------------------------------------
 
@@ -128,6 +171,7 @@ class FolderEditDialog(QDialog):
             "skip_threshold": self._threshold.value(),
             "exclude_skipped": self._exclude_skipped.isChecked(),
             "personal_algorithm": self._personal_algorithm.isChecked(),
+            "source_type": self._source_type(),
         }
 
 
@@ -207,7 +251,12 @@ class SettingsDialog(QDialog):
     def _reload_folders(self) -> None:
         self._folder_list.clear()
         for folder in self._context.state.get_folders():
-            location = "your favorited movies" if folder.is_favorites else folder.path
+            if folder.is_favorites:
+                location = "your favorited movies"
+            elif folder.source_type == SOURCE_CLOUD:
+                location = f"☁ archive.org: {folder.path}"
+            else:
+                location = folder.path
             item = QListWidgetItem(f"{folder.name}   —   {location}")
             item.setData(256, folder.id)  # Qt.UserRole == 256
             self._folder_list.addItem(item)
@@ -225,7 +274,7 @@ class SettingsDialog(QDialog):
             self._context.state.add_folder(
                 v["name"], v["path"], v["shuffle_count"],
                 v["skip_threshold"], v["exclude_skipped"],
-                v["personal_algorithm"],
+                v["personal_algorithm"], v["source_type"],
             )
         except ValueError as exc:
             QMessageBox.warning(self, "Cannot add folder", str(exc))
@@ -248,12 +297,14 @@ class SettingsDialog(QDialog):
                 skip_threshold=v["skip_threshold"],
                 exclude_skipped=v["exclude_skipped"],
                 personal_algorithm=v["personal_algorithm"],
+                source_type=v["source_type"],
             )
         except ValueError as exc:
             QMessageBox.warning(self, "Cannot update folder", str(exc))
             return
-        # A path change invalidates the cached scan.
-        self._context.library.invalidate(folder.path)
+        # A source/path change invalidates the cached listing (disk or cloud).
+        self._context.invalidate_source(folder)
+        self._context.invalidate_source(self._context.state.get_folder(folder_id))
         self._reload_folders()
 
     def _remove_folder(self) -> None:

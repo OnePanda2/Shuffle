@@ -26,7 +26,11 @@ files don't repeat too soon.
   only favorited movies. Favorited movies also get a gentle **priority** whenever
   their own genre plays. Click the filled heart again to un-favorite.
 - Multiple slots can share the same folder (shared history, separate windows).
-- Everything is local (`127.0.0.1`) and works with Wi-Fi off.
+- **Cloud genres (new):** a genre can stream from an **Internet Archive** item instead
+  of a local folder, so a huge library can live online for free instead of on your disk.
+  See "Cloud genres" below.
+- Local genres are fully offline (`127.0.0.1`) and work with Wi-Fi off. Cloud genres
+  stream over the internet; the two work side by side.
 - A bold neo-brutalist look with a **dark / light toggle** (☾ / ☀ in the top bar);
   your choice is remembered between launches.
 
@@ -81,6 +85,34 @@ the app at `vlc.exe`.
    favorited movies. Un-heart to remove.
 7. **Close Slot** closes that VLC window. Open and close slots from the app (use
    its *Close Slot* button rather than VLC's own window-close button).
+
+## Cloud genres (stream from Internet Archive)
+
+Short on disk space? Put your **own or public-domain** movies on the Internet Archive
+(free, no real size cap) and let a genre stream from there. VLC does the streaming; the
+app just picks the next URL.
+
+**1. Upload your movies** (once, per genre) with the free `ia` command-line tool:
+
+```powershell
+py -3.10 -m pip install internetarchive
+```
+```powershell
+ia upload my_movies_action *.mp4 --metadata="mediatype:movies" --metadata="noindex:true"
+```
+
+- `my_movies_action` is the **item identifier** — pick something unique and non-obvious
+  (it becomes part of the public URL). Use a separate item per genre.
+- `noindex:true` keeps the item **out of archive.org search** — it's reachable only by its
+  direct link. (Note: unlisted is not the same as private — anyone you give a link to can
+  open it, so keep your links to yourself.)
+- Upload one playable file per movie (e.g. `.mp4`/`.mkv`); large uploads take as long as
+  your connection allows and can run in the background.
+
+**2. Add a cloud genre in the app:** Settings → Add… → set **Type = Internet Archive** and
+enter your item ID(s), comma-separated. That's it — the slot streams a random movie from
+those items, with the same shuffle, cooldown, favorites, and Personal Algorithm as local
+genres. **Rescan** re-fetches the item's file list after you upload more.
 
 ## Testing
 

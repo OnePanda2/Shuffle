@@ -16,6 +16,7 @@ Modules are ordered low-level → high-level; each depends only on those above i
 | `config.py` | Immutable defaults, filesystem paths, supported media extensions, VLC auto-detection. | — |
 | `logging_setup.py` | Rotating file + console logging (idempotent). | — |
 | `media_library.py` | Recursive, error-tolerant folder scanning; extension filtering; per-folder scan caching; explicit rescan. Pure filesystem I/O. | config |
+| `cloud_library.py` | Cloud media source: list streamable video URLs from Internet Archive item(s) via the metadata API; cached per identifier; injectable fetch. Pure metadata I/O. | config |
 | `state_store.py` | SQLite persistence + data model: folders, exclusion list, review list, app settings. Thread-safe; corruption-recovering. | config |
 | `selection_engine.py` | **The core moat.** Eligible-pool construction + uniform random pick. Pure, I/O-free, statistically tested. | media_library |
 | `vlc_controller.py` | Launch/control one VLC process over its local HTTP interface: load a file, read status, terminate. | config |
@@ -99,6 +100,9 @@ folders
   skip_threshold  INTEGER   -- seconds
   exclude_skipped INTEGER   -- 0/1
   created_at      REAL
+  personal_algorithm INTEGER -- 0/1; weighted selection on
+  is_favorites    INTEGER   -- 0/1; the one virtual Favorites genre
+  source_type     TEXT      -- 'local' disk path | 'cloud' (path holds IA identifier[s])
 
 exclusion_list                         -- temporary per-file cooldown
   id              INTEGER PK
@@ -138,6 +142,19 @@ its own settings and its own independent history like any other folder.
 
 `favorites.folder_id` is `ON DELETE SET NULL` (not cascade) so removing a genre keeps
 its favorited files — they still play in the Favorites genre.
+
+**Cloud genres.** When `source_type = 'cloud'`, the folder's `path` holds one or more
+Internet Archive item identifiers (comma/newline separated) instead of a disk path.
+`SlotManager._folder_files` routes such a folder to `CloudLibrary`, which fetches each
+item's file list from `https://archive.org/metadata/<id>`, keeps **video** files (images
+are skipped — IA auto-generates thumbnail derivatives), and builds direct
+`https://archive.org/download/<id>/<file>` URLs. The URL is the file identifier
+everywhere else: `selection_engine`, cooldown, favorites, and the Personal Algorithm all
+work unchanged on URLs. `file_exists` treats any http(s) URL as present (no cheap remote
+check), and `vlc_controller.to_mrl` passes URLs through to VLC as-is (VLC streams them,
+following IA's redirect; the files support HTTP range requests). Favoriting a streamed
+movie stores its URL, so the Favorites genre can mix local and cloud files. Local genres
+are unchanged and remain fully offline.
 
 All history state is scoped by `folder_id`; deleting a folder cascades to *its*
 rows only, guaranteeing per-folder isolation. `remaining_count` is a countdown,
