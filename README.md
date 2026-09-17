@@ -92,22 +92,36 @@ Short on disk space? Put your **own or public-domain** movies on the Internet Ar
 (free, no real size cap) and let a genre stream from there. VLC does the streaming; the
 app just picks the next URL.
 
-**1. Upload your movies** (once, per genre) with the free `ia` command-line tool:
+**1. Upload your movies** (once, per genre) with the free `ia` command-line tool. First
+install it:
 
 ```powershell
 py -3.10 -m pip install internetarchive
 ```
+
+Then **`cd` into the folder that holds that genre's movies** and upload its contents. Doing
+it from inside the folder is important — it keeps the movies' file names clean. If you
+instead pass a full path like `ia upload my_movies_action "F:\Movies\Action\film.mp4"`,
+Internet Archive stores the whole path as the file name and (if you point at a single
+file) you upload only that one movie, so the genre can't shuffle.
+
 ```powershell
-ia upload my_movies_action *.mp4 --metadata="mediatype:movies" --metadata="noindex:true"
+cd "F:\Movies\Action"
+```
+```powershell
+ia upload my_movies_action * --metadata="mediatype:movies" --metadata="noindex:true"
 ```
 
 - `my_movies_action` is the **item identifier** — pick something unique and non-obvious
-  (it becomes part of the public URL). Use a separate item per genre.
+  (it becomes part of the public URL). Use a separate item per genre, and put **all** of
+  that genre's movies in it so there's something to shuffle between.
+- `*` uploads every file in the folder; the app automatically ignores non-video files.
 - `noindex:true` keeps the item **out of archive.org search** — it's reachable only by its
   direct link. (Note: unlisted is not the same as private — anyone you give a link to can
   open it, so keep your links to yourself.)
-- Upload one playable file per movie (e.g. `.mp4`/`.mkv`); large uploads take as long as
-  your connection allows and can run in the background.
+- Large uploads take as long as your connection allows and can run in the background. To
+  add more movies later, run the same `ia upload` again (from inside the folder) with the
+  same identifier, then hit **Rescan** in the app.
 
 **2. Add a cloud genre in the app:** Settings → Add… → set **Type = Internet Archive** and
 enter your item ID(s), comma-separated. That's it — the slot streams a random movie from
